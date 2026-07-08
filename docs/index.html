@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAMI-C - C Compiler for NES / Famicom 6502</title>
+  <meta name="description" content="FAMI-C is a small C compiler, 6502 assembler, NES runtime, and iNES ROM builder for NES/Famicom programs.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="hero">
+    <nav class="topbar" aria-label="Primary navigation">
+      <a class="brand" href="#top">FAMI-C</a>
+      <div class="navlinks">
+        <a href="#ko">한국어</a>
+        <a href="#ja">日本語</a>
+        <a href="#en">English</a>
+        <a href="https://github.com/jeong-jimin-github/FAMI-C">GitHub</a>
+      </div>
+    </nav>
+    <div class="hero-grid" id="top">
+      <section>
+        <p class="eyebrow">NES / Famicom 6502 Toolchain</p>
+        <h1>FAMI-C</h1>
+        <p class="lead">
+          NES 및 패미컴용 6502에서 실행되는 프로그램을 C로 작성하고,
+          자체 컴파일러, 어셈블러, 런타임, iNES 패키저로 ROM까지 빌드합니다.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="#quickstart">Quick Start</a>
+          <a class="button" href="#architecture">Architecture</a>
+        </div>
+      </section>
+      <section class="terminal" aria-label="Build command example">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <pre><code>python .\famic.py build .\examples\tetris.c `
+  -o .\build\tetris.nes `
+  --asm .\build\tetris.asm</code></pre>
+        <p>Output: mapper 0 iNES ROM for Mesen, FCEUX, Nestopia, or hardware-compatible workflows.</p>
+      </section>
+    </div>
+  </header>
+
+  <main>
+    <section class="band" id="quickstart">
+      <div class="wrap">
+        <h2>Quick Start</h2>
+        <div class="columns">
+          <article>
+            <h3>Requirements</h3>
+            <ul>
+              <li>Python 3.10 or newer</li>
+              <li>Windows PowerShell, macOS shell, or Linux shell</li>
+              <li>NES emulator such as Mesen 2.2.1</li>
+            </ul>
+          </article>
+          <article>
+            <h3>Build Tetris</h3>
+            <pre><code>python .\famic.py build .\examples\tetris.c -o .\build\tetris.nes --asm .\build\tetris.asm</code></pre>
+            <p>Windows users can also run:</p>
+            <pre><code>.\build.ps1</code></pre>
+          </article>
+          <article>
+            <h3>Run Tests</h3>
+            <pre><code>python -m unittest discover -s tests</code></pre>
+            <p>The tests verify compilation, PRG size, iNES header fields, reset vectors, and RAM placement.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap" id="architecture">
+      <h2>Compiler Architecture</h2>
+      <div class="pipeline">
+        <div><strong>C source</strong><span>Lexer and parser</span></div>
+        <div><strong>AST</strong><span>8-bit NES-oriented semantic model</span></div>
+        <div><strong>6502 assembly</strong><span>Static locals, native runtime calls</span></div>
+        <div><strong>PRG ROM</strong><span>Built-in 6502 assembler</span></div>
+        <div><strong>iNES ROM</strong><span>NROM-128 mapper 0 package</span></div>
+      </div>
+      <p>
+        FAMI-C is intentionally self-contained. The compiler emits assembly, the assembler resolves labels
+        and vectors, and the packager writes a 16 KB PRG + 8 KB CHR iNES image.
+      </p>
+    </section>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>Supported C Model</h2>
+        <div class="columns">
+          <article>
+            <h3>Supported</h3>
+            <ul>
+              <li><code>char</code>, <code>unsigned char</code>, <code>int</code>, <code>unsigned int</code>, <code>void</code></li>
+              <li>8-bit arithmetic, comparison, logical operators, arrays, and function calls</li>
+              <li><code>if</code>, <code>else</code>, <code>while</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>return</code></li>
+              <li>Global RAM variables and <code>const unsigned char</code> ROM tables</li>
+            </ul>
+          </article>
+          <article>
+            <h3>NES Runtime API</h3>
+            <pre><code>extern void wait_vblank(void);
+extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
+extern unsigned char read_pad(void);
+extern unsigned char rand8(void);</code></pre>
+          </article>
+          <article>
+            <h3>Current Limits</h3>
+            <ul>
+              <li>Arithmetic ABI is 8-bit.</li>
+              <li>Locals are statically allocated; recursion is not supported.</li>
+              <li>Pointers, structs, casts, varargs, and libc are not implemented.</li>
+              <li>Generated ROMs target mapper 0 / NROM-128.</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap">
+      <h2>Example: Tetris</h2>
+      <p>
+        The example in <code>examples/tetris.c</code> demonstrates static arrays, ROM lookup tables,
+        controller polling, collision checks, line clearing, and vblank-safe PPU updates.
+      </p>
+      <div class="columns">
+        <article>
+          <h3>Controls</h3>
+          <ul>
+            <li>Left / Right: move piece</li>
+            <li>Down: soft drop</li>
+            <li>A: rotate</li>
+          </ul>
+        </article>
+        <article>
+          <h3>Verified With</h3>
+          <ul>
+            <li>Mesen 2.2.1 on Windows</li>
+            <li>Automated Python unit tests</li>
+            <li>iNES header and vector checks</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="language wrap" id="ko">
+      <p class="eyebrow">한국어 문서</p>
+      <h2>FAMI-C 사용 방법</h2>
+      <p>
+        FAMI-C는 NES/패미컴 프로그램을 C로 작성하기 위한 작은 툴체인입니다.
+        목적은 최신 데스크톱 C 전체를 6502에 억지로 옮기는 것이 아니라,
+        실제 NES 개발에 필요한 정적 메모리, 8비트 연산, PPU/패드 런타임을 단순하게 제공하는 것입니다.
+      </p>
+      <ol>
+        <li>소스 파일을 <code>examples</code> 또는 별도 폴더에 작성합니다.</li>
+        <li><code>extern</code> 런타임 함수를 선언하고, <code>main(void)</code>을 구현합니다.</li>
+        <li><code>python .\famic.py build source.c -o build/game.nes --asm build/game.asm</code>으로 빌드합니다.</li>
+        <li>Mesen 같은 에뮬레이터에서 <code>.nes</code> 파일을 엽니다.</li>
+      </ol>
+      <p>
+        자세한 한국어 Wiki는
+        <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/KO-Home">KO-Home</a>에서 볼 수 있습니다.
+      </p>
+    </section>
+
+    <section class="language wrap" id="ja" lang="ja">
+      <p class="eyebrow">日本語ドキュメント</p>
+      <h2>FAMI-C の使い方</h2>
+      <p>
+        FAMI-C は NES / ファミコン向けの小さな C ツールチェーンです。
+        6502 に合わせた 8 ビット ABI、静的メモリ、PPU 更新、コントローラー入力を
+        シンプルな C サブセットから扱えるようにします。
+      </p>
+      <ol>
+        <li>C ソースに <code>main(void)</code> を実装します。</li>
+        <li>必要なランタイム関数を <code>extern</code> 宣言します。</li>
+        <li><code>python .\famic.py build source.c -o build/game.nes --asm build/game.asm</code> を実行します。</li>
+        <li>Mesen などのエミュレーターで生成された ROM を開きます。</li>
+      </ol>
+      <p>
+        日本語 Wiki は
+        <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/JA-Home">JA-Home</a> にあります。
+      </p>
+    </section>
+
+    <section class="language wrap" id="en" lang="en">
+      <p class="eyebrow">English Documentation</p>
+      <h2>How To Use FAMI-C</h2>
+      <p>
+        FAMI-C is a compact C toolchain for NES / Famicom programs. It favors a practical 8-bit
+        programming model over full hosted ISO C, making it suitable for small mapper-0 games and demos.
+      </p>
+      <ol>
+        <li>Write a C source file with <code>main(void)</code>.</li>
+        <li>Declare the native runtime functions your program uses.</li>
+        <li>Run <code>python .\famic.py build source.c -o build/game.nes --asm build/game.asm</code>.</li>
+        <li>Open the generated ROM in Mesen or another NES emulator.</li>
+      </ol>
+      <p>
+        The English Wiki starts at
+        <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/EN-Home">EN-Home</a>.
+      </p>
+    </section>
+  </main>
+
+  <footer>
+    <p>FAMI-C - C compiler, 6502 assembler, NES runtime, and iNES ROM builder.</p>
+    <p><a href="https://github.com/jeong-jimin-github/FAMI-C">Repository</a> · <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki">Wiki</a></p>
+  </footer>
+</body>
+</html>

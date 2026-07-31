@@ -21,6 +21,21 @@ class CompileError(Exception):
     pass
 
 
+# ROMs are NROM-256: a single 32K PRG bank mapped at $8000, one 8K CHR bank,
+# and the 6502 vectors in the last six bytes.  NROM-256 is still iNES mapper 0,
+# so the packaging stays as portable as the older 16K layout while leaving room
+# for the example game's music, sound effects, and menus.
+PRG_BASE = 0x8000
+PRG_SIZE = 0x8000
+PRG_VECTORS = PRG_BASE + PRG_SIZE - 6
+PRG_BANKS = PRG_SIZE // 0x4000
+CHR_SIZE = 0x2000
+
+# Sound-effect slot count.  Slot zero is reserved as "stop the current effect",
+# so a program can define up to fifteen distinct effects.
+SFX_SLOTS = 16
+
+
 @dataclass
 class Token:
     kind: str
@@ -734,6 +749,28 @@ class Symbol:
     is_const: bool = False
 
 
+# NTSC 2A03 timer periods for MIDI notes 29 through 95.  The pulse
+# channels cannot represent notes below MIDI 33, so their first four entries
+# are clamped to the lowest available pulse frequency.  Triangle uses a
+# different divider and therefore needs its own table.
+MUSIC_PULSE_TIMERS = (
+    2047, 2047, 2047, 2047, 2033, 1919, 1811, 1709, 1613, 1523, 1437,
+    1356, 1280, 1208, 1140, 1076, 1016, 959, 905, 854, 806, 761, 718,
+    678, 640, 604, 570, 538, 507, 479, 452, 427, 403, 380, 359, 338,
+    319, 301, 284, 268, 253, 239, 225, 213, 201, 189, 179, 169, 159,
+    150, 142, 134, 126, 119, 112, 106, 100, 94, 89, 84, 79, 75, 70,
+    66, 63, 59, 56,
+)
+
+MUSIC_TRIANGLE_TIMERS = (
+    1280, 1208, 1140, 1076, 1016, 959, 905, 854, 806, 761, 718, 678,
+    640, 604, 570, 538, 507, 479, 452, 427, 403, 380, 359, 338, 319,
+    301, 284, 268, 253, 239, 225, 213, 201, 189, 179, 169, 159, 150,
+    142, 134, 126, 119, 112, 106, 100, 94, 89, 84, 79, 75, 70, 66,
+    63, 59, 56, 52, 49, 47, 44, 41, 39, 37, 35, 33, 31, 29, 27,
+)
+
+
 class CodeGenerator:
     def __init__(self, program: Program):
         self.program = program
@@ -746,6 +783,13 @@ class CodeGenerator:
         self.return_label = ""
         self.break_stack: List[str] = []
         self.continue_stack: List[str] = []
+        self.music_runtime = False
+        self.music_compressed = False
+        self.preview_runtime = False
+        self.board_runtime = False
+        self.board_runtime_param = ""
+        self.sfx_runtime = False
+        self.sfx_runtime_param = ""
 
     def generate(self) -> str:
         self.index_program()
@@ -760,7 +804,7 @@ class CodeGenerator:
                 self.emit_function(fn)
         self.emit_runtime_helpers()
         self.emit("")
-        self.emit(".org $BFFA")
+        self.emit(f".org ${PRG_VECTORS:04X}")
         self.emit(".word _nmi")
         self.emit(".word _reset")
         self.emit(".word _irq")
@@ -779,6 +823,125 @@ class CodeGenerator:
             self.functions[fn.name] = fn
         if "main" not in self.functions:
             raise CompileError("program needs a main function")
+        self.music_runtime = any(
+            fn.name == "music_init"
+            and fn.body is None
+            and fn.is_extern
+            and fn.ret_type.is_extern
+            and fn.ret_type.is_void
+            and not fn.params
+            for fn in self.program.functions
+        )
+        if self.music_runtime:
+            legacy_sizes = {
+                "MUSIC_PULSE1": 256,
+                "MUSIC_PULSE2": 256,
+                "MUSIC_TRIANGLE": 256,
+                "MUSIC_NOISE": 256,
+            }
+            compressed_sizes = {
+                "MUSIC_PULSE1_BASE": 77,
+                "MUSIC_PULSE1_PAIR0": 77,
+                "MUSIC_PULSE1_PAIR1": 77,
+                "MUSIC_PULSE1_PAIR2": 77,
+                "MUSIC_PULSE1_PAIR3": 77,
+                "MUSIC_PULSE2_BASE": 30,
+                "MUSIC_PULSE2_PAIR0": 30,
+                "MUSIC_PULSE2_PAIR1": 30,
+                "MUSIC_PULSE2_PAIR2": 30,
+                "MUSIC_PULSE2_PAIR3": 30,
+                "MUSIC_TRIANGLE_BASE": 47,
+                "MUSIC_TRIANGLE_PAIR0": 47,
+                "MUSIC_TRIANGLE_PAIR1": 47,
+                "MUSIC_TRIANGLE_PAIR2": 47,
+                "MUSIC_TRIANGLE_PAIR3": 47,
+                "MUSIC_NOISE_PAIR0": 70,
+                "MUSIC_NOISE_PAIR1": 70,
+                "MUSIC_NOISE_PAIR2": 70,
+                "MUSIC_NOISE_PAIR3": 70,
+                "MUSIC_TUPLE_PULSE1": 156,
+                "MUSIC_TUPLE_PULSE2": 156,
+                "MUSIC_TUPLE_TRIANGLE": 156,
+                "MUSIC_TUPLE_NOISE": 156,
+                "MUSIC_ORDER0": 256,
+                "MUSIC_ORDER1": 50,
+            }
+
+            def has_music_arrays(sizes: Dict[str, int]) -> bool:
+                return all(
+                    (sym := self.globals.get(name)) is not None
+                    and sym.is_const
+                    and sym.array_size == size
+                    for name, size in sizes.items()
+                )
+
+            if has_music_arrays(compressed_sizes):
+                self.music_compressed = True
+            elif not has_music_arrays(legacy_sizes):
+                raise CompileError(
+                    "music runtime needs four const MUSIC_*[256] arrays or the "
+                    "compressed v2 pattern/order arrays"
+                )
+        else:
+            for name in ("music_pause", "music_resume"):
+                if any(
+                    fn.name == name and fn.body is None and fn.is_extern
+                    for fn in self.program.functions
+                ):
+                    raise CompileError(f"{name} needs the music runtime; declare music_init")
+        self.preview_runtime = any(
+            fn.name == "ppu_write_preview"
+            and fn.body is None
+            and fn.is_extern
+            and fn.ret_type.is_extern
+            and fn.ret_type.is_void
+            and not fn.params
+            for fn in self.program.functions
+        )
+        if self.preview_runtime:
+            preview = self.globals.get("preview_tiles")
+            if preview is None or preview.is_const or preview.array_size != 16:
+                raise CompileError("ppu_write_preview needs unsigned char preview_tiles[16]")
+        board_runtime_fn = next(
+            (
+                fn
+                for fn in self.program.functions
+                if fn.name == "ppu_write_board_half"
+                and fn.body is None
+                and fn.is_extern
+                and fn.ret_type.is_extern
+                and fn.ret_type.is_void
+                and len(fn.params) == 1
+            ),
+            None,
+        )
+        self.board_runtime = board_runtime_fn is not None
+        if board_runtime_fn is not None:
+            board = self.globals.get("board")
+            if board is None or board.is_const or board.array_size != 200:
+                raise CompileError("ppu_write_board_half needs unsigned char board[200]")
+            self.board_runtime_param = self.param_label(
+                board_runtime_fn.name, board_runtime_fn.params[0].name
+            )
+        sfx_runtime_fn = next(
+            (
+                fn
+                for fn in self.program.functions
+                if fn.name == "sfx_play"
+                and fn.body is None
+                and fn.is_extern
+                and fn.ret_type.is_extern
+                and fn.ret_type.is_void
+                and len(fn.params) == 1
+            ),
+            None,
+        )
+        self.sfx_runtime = sfx_runtime_fn is not None
+        if sfx_runtime_fn is not None:
+            self.check_sfx_tables()
+            self.sfx_runtime_param = self.param_label(
+                sfx_runtime_fn.name, sfx_runtime_fn.params[0].name
+            )
         for fn in self.program.functions:
             scope: Dict[str, Symbol] = {}
             for p in fn.params:
@@ -791,6 +954,28 @@ class CodeGenerator:
                         raise CompileError(f"duplicate local {decl.name} in {fn.name}")
                     scope[decl.name] = Symbol(decl.name, self.local_label(fn.name, decl.name))
             self.func_symbols[fn.name] = scope
+
+    def check_sfx_tables(self) -> None:
+        """Validate the const tables the sound-effect driver indexes."""
+
+        for name in ("SFX_START", "SFX_LENGTH"):
+            sym = self.globals.get(name)
+            if sym is None or not sym.is_const or sym.array_size != SFX_SLOTS:
+                raise CompileError(
+                    f"sfx_play needs const unsigned char {name}[{SFX_SLOTS}]"
+                )
+        frame_sizes = []
+        for name in ("SFX_CTRL", "SFX_TIMER_LO", "SFX_TIMER_HI"):
+            sym = self.globals.get(name)
+            if sym is None or not sym.is_const or not sym.array_size:
+                raise CompileError(f"sfx_play needs a const unsigned char {name}[] table")
+            frame_sizes.append(sym.array_size)
+        if len(set(frame_sizes)) != 1:
+            raise CompileError(
+                "SFX_CTRL, SFX_TIMER_LO and SFX_TIMER_HI must have the same length"
+            )
+        if frame_sizes[0] > 256:
+            raise CompileError("sound-effect frame tables are limited to 256 entries")
 
     def collect_locals(self, stmt: Stmt) -> List[VarDecl]:
         out: List[VarDecl] = []
@@ -812,8 +997,50 @@ class CodeGenerator:
         return out
 
     def emit_ram(self) -> None:
-        for name in ("__tmp0", "__tmp1", "__tmp2", "__tmp3", "_nmi_flag", "_pad_state", "_rng_state"):
+        for name in (
+            "__tmp0",
+            "__tmp1",
+            "__tmp2",
+            "__tmp3",
+            "__ppu_rendering",
+            "_nmi_flag",
+            "_pad_state",
+            "_rng_state",
+            "_rng_state_hi",
+        ):
             self.emit(f".ram {name} 1")
+        if self.music_runtime:
+            music_ram = [
+                "__music_enabled",
+                "__music_step",
+                "__music_last_pulse1",
+                "__music_last_pulse2",
+                "__music_last_triangle",
+            ]
+            if self.music_compressed:
+                music_ram.extend(
+                    [
+                        "__music_phase_lo",
+                        "__music_phase_hi",
+                        "__music_phase_inc_lo",
+                        "__music_phase_inc_hi",
+                        "__music_order_lo",
+                        "__music_order_page",
+                        "__music_pattern_step",
+                        "__music_pattern_pulse1",
+                        "__music_pattern_pulse2",
+                        "__music_pattern_triangle",
+                        "__music_pattern_noise",
+                        "__music_note_base",
+                    ]
+                )
+            else:
+                music_ram.extend(["__music_frames", "__music_phase"])
+            for name in music_ram:
+                self.emit(f".ram {name} 1")
+        if self.sfx_runtime:
+            for name in ("__sfx_pos", "__sfx_left", "__sfx_hi"):
+                self.emit(f".ram {name} 1")
         for g in self.program.globals:
             if not g.type.is_const:
                 size = g.array_size if g.array_size else 1
@@ -1204,11 +1431,29 @@ class CodeGenerator:
         self.emit("STA _nmi_flag")
         self.emit("LDA #$5A")
         self.emit("STA _rng_state")
+        self.emit("LDA #$A5")
+        self.emit("STA _rng_state_hi")
+        self.emit("LDA #$01")
+        self.emit("STA __ppu_rendering")
+        if self.music_runtime:
+            self.emit("LDA #$00")
+            self.emit("STA __music_enabled")
+            self.emit("STA $4015")
+        if self.sfx_runtime:
+            self.emit("LDA #$00")
+            self.emit("STA __sfx_left")
+            self.emit("STA __sfx_pos")
+            self.emit("STA __sfx_hi")
+            # Effects have to be audible even before music_init() runs.
+            self.emit("LDA #$0F")
+            self.emit("STA $4015")
+            self.emit("LDA #$30")
+            self.emit("STA $4004")
         self.emit("JSR _clear_nametable")
         self.emit("JSR _load_palettes")
         self.emit("LDA #$80")
         self.emit("STA $2000")
-        self.emit("LDA #$1E")
+        self.emit("LDA #$0A")
         self.emit("STA $2001")
         self.emit("JSR _main")
         self.emit("_forever:")
@@ -1224,9 +1469,18 @@ class CodeGenerator:
         self.emit("PHA")
         self.emit("LDA #$01")
         self.emit("STA _nmi_flag")
+        self.emit("LDA __ppu_rendering")
+        self.emit("BEQ __nmi_scroll_done")
         self.emit("LDA #$00")
         self.emit("STA $2005")
         self.emit("STA $2005")
+        self.emit("__nmi_scroll_done:")
+        if self.music_runtime:
+            self.emit("JSR _music_tick")
+        # Effects run after the song so a triggered effect always owns pulse 2
+        # for the frames it lasts.
+        if self.sfx_runtime:
+            self.emit("JSR _sfx_tick")
         self.emit("PLA")
         self.emit("TAY")
         self.emit("PLA")
@@ -1273,10 +1527,13 @@ class CodeGenerator:
         self.emit("_ppu_off:")
         self.emit("LDA #$00")
         self.emit("STA $2001")
+        self.emit("STA __ppu_rendering")
         self.emit("RTS")
         self.emit("")
         self.emit("_ppu_on:")
-        self.emit("LDA #$1E")
+        self.emit("LDA #$01")
+        self.emit("STA __ppu_rendering")
+        self.emit("LDA #$0A")
         self.emit("STA $2001")
         self.emit("RTS")
         self.emit("")
@@ -1297,13 +1554,18 @@ class CodeGenerator:
         self.emit("RTS")
         self.emit("")
         self.emit("_rand8:")
+        self.emit("LDA _rng_state_hi")
+        self.emit("LSR A")
+        self.emit("STA _rng_state_hi")
         self.emit("LDA _rng_state")
-        self.emit("ASL A")
-        self.emit("BCC _rand8_no_xor")
-        self.emit("EOR #$1D")
-        self.emit("_rand8_no_xor:")
-        self.emit("ADC _nmi_flag")
+        self.emit("ROR A")
         self.emit("STA _rng_state")
+        self.emit("BCC _rand8_no_xor")
+        self.emit("LDA _rng_state_hi")
+        self.emit("EOR #$B4")
+        self.emit("STA _rng_state_hi")
+        self.emit("_rand8_no_xor:")
+        self.emit("LDA _rng_state")
         self.emit("RTS")
         self.emit("")
         self.emit("_clear_nametable:")
@@ -1339,10 +1601,18 @@ class CodeGenerator:
         self.emit("BNE _load_palette_loop")
         self.emit("RTS")
         self.emit("_palette_data:")
-        self.emit(".byte $0F, $30, $21, $11, $0F, $30, $27, $17")
-        self.emit(".byte $0F, $30, $2A, $1A, $0F, $30, $24, $14")
-        self.emit(".byte $0F, $30, $21, $11, $0F, $30, $27, $17")
-        self.emit(".byte $0F, $30, $2A, $1A, $0F, $30, $24, $14")
+        self.emit(".byte $0F, $01, $21, $30, $0F, $06, $16, $30")
+        self.emit(".byte $0F, $09, $19, $30, $0F, $04, $24, $30")
+        self.emit(".byte $0F, $01, $21, $30, $0F, $06, $16, $30")
+        self.emit(".byte $0F, $09, $19, $30, $0F, $04, $24, $30")
+        if self.music_runtime:
+            self.emit_music_runtime()
+        if self.sfx_runtime:
+            self.emit_sfx_runtime()
+        if self.preview_runtime:
+            self.emit_preview_runtime()
+        if self.board_runtime:
+            self.emit_board_runtime()
         if "render_queue" in self.functions:
             self.emit_render_queue_helper()
         self.emit("")
@@ -1380,6 +1650,695 @@ class CodeGenerator:
         self.emit("JMP __divmod_loop")
         self.emit("__divmod_done:")
         self.emit("LDA __tmp2")
+        self.emit("RTS")
+
+    def emit_compressed_music_runtime(self) -> None:
+        self.emit("")
+        self.emit("_music_init:")
+        self.emit("LDA #$00")
+        self.emit("STA __music_enabled")
+        self.emit("STA __music_step")
+        self.emit("STA __music_order_lo")
+        self.emit("STA __music_order_page")
+        self.emit("STA __music_pattern_step")
+        # Start one increment before overflow so step zero is heard on the
+        # first NMI after music_init().  $2730 is 138 BPM at NTSC cadence.
+        self.emit("LDA #$D0")
+        self.emit("STA __music_phase_lo")
+        self.emit("LDA #$D8")
+        self.emit("STA __music_phase_hi")
+        self.emit("LDA #$30")
+        self.emit("STA __music_phase_inc_lo")
+        self.emit("LDA #$27")
+        self.emit("STA __music_phase_inc_hi")
+        self.emit("LDA #$FF")
+        self.emit("STA __music_last_pulse1")
+        self.emit("STA __music_last_pulse2")
+        self.emit("STA __music_last_triangle")
+        self.emit("LDA #$70")
+        self.emit("STA $4000")
+        self.emit("LDA #$08")
+        self.emit("STA $4001")
+        self.emit("LDA #$30")
+        self.emit("STA $4004")
+        self.emit("LDA #$08")
+        self.emit("STA $4005")
+        self.emit("LDA #$80")
+        self.emit("STA $4008")
+        self.emit("LDA #$30")
+        self.emit("STA $400C")
+        self.emit("LDA #$0F")
+        self.emit("STA $4015")
+        self.emit("LDA #$01")
+        self.emit("STA __music_enabled")
+        self.emit("RTS")
+
+        self.emit_music_transport()
+
+        self.emit("")
+        self.emit("_music_tick:")
+        self.emit("LDA __music_enabled")
+        self.emit("BNE __music_tick_compressed_active")
+        self.emit("RTS")
+        self.emit("__music_tick_compressed_active:")
+        self.emit("CLC")
+        self.emit("LDA __music_phase_lo")
+        self.emit("ADC __music_phase_inc_lo")
+        self.emit("STA __music_phase_lo")
+        self.emit("LDA __music_phase_hi")
+        self.emit("ADC __music_phase_inc_hi")
+        self.emit("STA __music_phase_hi")
+        self.emit("BCS __music_compressed_step_due")
+        self.emit("RTS")
+        self.emit("__music_compressed_step_due:")
+        self.emit("LDA __music_pattern_step")
+        self.emit("BNE __music_compressed_patterns_ready")
+        self.emit("JSR __music_load_pattern")
+        self.emit("__music_compressed_patterns_ready:")
+
+        # Pulse 1: 25 percent duty, constant volume 11.
+        self.emit("JSR __music_decode_pulse1")
+        self.emit("CMP __music_last_pulse1")
+        self.emit("BEQ __music_compressed_pulse1_done")
+        self.emit("STA __music_last_pulse1")
+        self.emit("CMP #$1D")
+        self.emit("BCC __music_compressed_pulse1_rest")
+        self.emit("CMP #$60")
+        self.emit("BCS __music_compressed_pulse1_rest")
+        self.emit("SEC")
+        self.emit("SBC #$1D")
+        self.emit("TAX")
+        self.emit("LDA #$7B")
+        self.emit("STA $4000")
+        self.emit("LDA __music_pulse_timer_lo,X")
+        self.emit("STA $4002")
+        self.emit("LDA __music_pulse_timer_hi,X")
+        self.emit("ORA #$F8")
+        self.emit("STA $4003")
+        self.emit("JMP __music_compressed_pulse1_done")
+        self.emit("__music_compressed_pulse1_rest:")
+        self.emit("LDA #$70")
+        self.emit("STA $4000")
+        self.emit("__music_compressed_pulse1_done:")
+
+        # Pulse 2: 12.5 percent duty, constant volume 6.
+        self.emit("JSR __music_decode_pulse2")
+        self.emit("CMP __music_last_pulse2")
+        self.emit("BEQ __music_compressed_pulse2_done")
+        self.emit("STA __music_last_pulse2")
+        self.emit("CMP #$1D")
+        self.emit("BCC __music_compressed_pulse2_rest")
+        self.emit("CMP #$60")
+        self.emit("BCS __music_compressed_pulse2_rest")
+        self.emit("SEC")
+        self.emit("SBC #$1D")
+        self.emit("TAX")
+        self.emit("LDA #$36")
+        self.emit("STA $4004")
+        self.emit("LDA __music_pulse_timer_lo,X")
+        self.emit("STA $4006")
+        self.emit("LDA __music_pulse_timer_hi,X")
+        self.emit("ORA #$F8")
+        self.emit("STA $4007")
+        self.emit("JMP __music_compressed_pulse2_done")
+        self.emit("__music_compressed_pulse2_rest:")
+        self.emit("LDA #$30")
+        self.emit("STA $4004")
+        self.emit("__music_compressed_pulse2_done:")
+
+        # Triangle has a divide-by-32 timer, unlike the pulse channels.
+        self.emit("JSR __music_decode_triangle")
+        self.emit("CMP __music_last_triangle")
+        self.emit("BEQ __music_compressed_triangle_done")
+        self.emit("STA __music_last_triangle")
+        self.emit("CMP #$1D")
+        self.emit("BCC __music_compressed_triangle_rest")
+        self.emit("CMP #$60")
+        self.emit("BCS __music_compressed_triangle_rest")
+        self.emit("SEC")
+        self.emit("SBC #$1D")
+        self.emit("TAX")
+        self.emit("LDA #$FF")
+        self.emit("STA $4008")
+        self.emit("LDA __music_triangle_timer_lo,X")
+        self.emit("STA $400A")
+        self.emit("LDA __music_triangle_timer_hi,X")
+        self.emit("ORA #$F8")
+        self.emit("STA $400B")
+        self.emit("JMP __music_compressed_triangle_done")
+        self.emit("__music_compressed_triangle_rest:")
+        self.emit("LDA #$80")
+        self.emit("STA $4008")
+        self.emit("LDA #$00")
+        self.emit("STA $400A")
+        self.emit("STA $400B")
+        self.emit("__music_compressed_triangle_done:")
+
+        # Noise is retriggered on every percussion step.
+        self.emit("JSR __music_decode_noise")
+        self.emit("CMP #$01")
+        self.emit("BEQ __music_compressed_noise_closed_hat")
+        self.emit("CMP #$02")
+        self.emit("BEQ __music_compressed_noise_open_hat")
+        self.emit("CMP #$03")
+        self.emit("BEQ __music_compressed_noise_kick")
+        self.emit("CMP #$04")
+        self.emit("BEQ __music_compressed_noise_snare")
+        self.emit("CMP #$05")
+        self.emit("BEQ __music_compressed_noise_tom")
+        self.emit("CMP #$06")
+        self.emit("BEQ __music_compressed_noise_cymbal")
+        self.emit("LDA #$30")
+        self.emit("STA $400C")
+        self.emit("JMP __music_compressed_noise_done")
+        self.emit("__music_compressed_noise_closed_hat:")
+        self.emit("LDA #$34")
+        self.emit("STA $400C")
+        self.emit("LDA #$82")
+        self.emit("STA $400E")
+        self.emit("JMP __music_compressed_noise_trigger")
+        self.emit("__music_compressed_noise_open_hat:")
+        self.emit("LDA #$35")
+        self.emit("STA $400C")
+        self.emit("LDA #$84")
+        self.emit("STA $400E")
+        self.emit("JMP __music_compressed_noise_trigger")
+        self.emit("__music_compressed_noise_kick:")
+        self.emit("LDA #$3F")
+        self.emit("STA $400C")
+        self.emit("LDA #$0E")
+        self.emit("STA $400E")
+        self.emit("JMP __music_compressed_noise_trigger")
+        self.emit("__music_compressed_noise_snare:")
+        self.emit("LDA #$3C")
+        self.emit("STA $400C")
+        self.emit("LDA #$06")
+        self.emit("STA $400E")
+        self.emit("JMP __music_compressed_noise_trigger")
+        self.emit("__music_compressed_noise_tom:")
+        self.emit("LDA #$3A")
+        self.emit("STA $400C")
+        self.emit("LDA #$0B")
+        self.emit("STA $400E")
+        self.emit("JMP __music_compressed_noise_trigger")
+        self.emit("__music_compressed_noise_cymbal:")
+        self.emit("LDA #$37")
+        self.emit("STA $400C")
+        self.emit("LDA #$83")
+        self.emit("STA $400E")
+        self.emit("__music_compressed_noise_trigger:")
+        self.emit("LDA #$F8")
+        self.emit("STA $400F")
+        self.emit("__music_compressed_noise_done:")
+
+        self.emit("INC __music_step")
+        self.emit("INC __music_pattern_step")
+        self.emit("LDA __music_pattern_step")
+        self.emit("CMP #$08")
+        self.emit("BCC __music_compressed_tick_done")
+        self.emit("LDA #$00")
+        self.emit("STA __music_pattern_step")
+        self.emit("INC __music_order_lo")
+        self.emit("BNE __music_compressed_order_advanced")
+        self.emit("INC __music_order_page")
+        self.emit("__music_compressed_order_advanced:")
+        # The order is 306 patterns: page zero plus 50 entries on page one.
+        self.emit("LDA __music_order_page")
+        self.emit("CMP #$01")
+        self.emit("BCC __music_compressed_tick_done")
+        self.emit("BNE __music_compressed_loop_song")
+        self.emit("LDA __music_order_lo")
+        self.emit("CMP #$32")
+        self.emit("BCC __music_compressed_tick_done")
+        self.emit("__music_compressed_loop_song:")
+        self.emit("LDA #$00")
+        self.emit("STA __music_order_lo")
+        self.emit("STA __music_order_page")
+        self.emit("__music_compressed_tick_done:")
+        self.emit("RTS")
+
+        self.emit("")
+        self.emit("__music_load_pattern:")
+        self.emit("LDY __music_order_lo")
+        self.emit("LDA __music_order_page")
+        self.emit("BEQ __music_load_order0")
+        self.emit("LDA _MUSIC_ORDER1,Y")
+        self.emit("JMP __music_load_tuple")
+        self.emit("__music_load_order0:")
+        self.emit("LDA _MUSIC_ORDER0,Y")
+        self.emit("__music_load_tuple:")
+        self.emit("TAY")
+        self.emit("LDA _MUSIC_TUPLE_PULSE1,Y")
+        self.emit("STA __music_pattern_pulse1")
+        self.emit("LDA _MUSIC_TUPLE_PULSE2,Y")
+        self.emit("STA __music_pattern_pulse2")
+        self.emit("LDA _MUSIC_TUPLE_TRIANGLE,Y")
+        self.emit("STA __music_pattern_triangle")
+        self.emit("LDA _MUSIC_TUPLE_NOISE,Y")
+        self.emit("STA __music_pattern_noise")
+        # The accumulator has already crossed the step-zero boundary when
+        # this runs, so changing the increment here applies the new tempo to
+        # the interval *after* MIDI beats 492 and 494, not one step early.
+        self.emit("LDA __music_order_page")
+        self.emit("BNE __music_load_tempo_done")
+        self.emit("LDA __music_order_lo")
+        self.emit("CMP #$F2")
+        self.emit("BEQ __music_load_slow_tempo")
+        self.emit("CMP #$F3")
+        self.emit("BNE __music_load_tempo_done")
+        self.emit("LDA #$30")
+        self.emit("STA __music_phase_inc_lo")
+        self.emit("LDA #$27")
+        self.emit("STA __music_phase_inc_hi")
+        self.emit("RTS")
+        self.emit("__music_load_slow_tempo:")
+        self.emit("LDA #$7C")
+        self.emit("STA __music_phase_inc_lo")
+        self.emit("LDA #$25")
+        self.emit("STA __music_phase_inc_hi")
+        self.emit("RTS")
+        self.emit("__music_load_tempo_done:")
+        self.emit("RTS")
+
+        def emit_tonal_decoder(label: str, stem: str, pattern_ram: str) -> None:
+            self.emit("")
+            self.emit(f"__music_decode_{label}:")
+            self.emit(f"LDX {pattern_ram}")
+            self.emit(f"LDA _MUSIC_{stem}_BASE,X")
+            self.emit("STA __music_note_base")
+            self.emit("LDA __music_pattern_step")
+            self.emit("CMP #$02")
+            self.emit(f"BCC __music_decode_{label}_pair0")
+            self.emit("CMP #$04")
+            self.emit(f"BCC __music_decode_{label}_pair1")
+            self.emit("CMP #$06")
+            self.emit(f"BCC __music_decode_{label}_pair2")
+            self.emit(f"LDA _MUSIC_{stem}_PAIR3,X")
+            self.emit(f"JMP __music_decode_{label}_packed")
+            for pair in range(3):
+                self.emit(f"__music_decode_{label}_pair{pair}:")
+                self.emit(f"LDA _MUSIC_{stem}_PAIR{pair},X")
+                self.emit(f"JMP __music_decode_{label}_packed")
+            self.emit(f"__music_decode_{label}_packed:")
+            self.emit("TAX")
+            self.emit("LDA __music_pattern_step")
+            self.emit("AND #$01")
+            self.emit(f"BNE __music_decode_{label}_low")
+            self.emit("TXA")
+            self.emit("LSR A")
+            self.emit("LSR A")
+            self.emit("LSR A")
+            self.emit("LSR A")
+            self.emit(f"JMP __music_decode_{label}_note")
+            self.emit(f"__music_decode_{label}_low:")
+            self.emit("TXA")
+            self.emit("AND #$0F")
+            self.emit(f"__music_decode_{label}_note:")
+            self.emit(f"BEQ __music_decode_{label}_rest")
+            self.emit("CLC")
+            self.emit("ADC __music_note_base")
+            self.emit("SEC")
+            self.emit("SBC #$01")
+            self.emit("RTS")
+            self.emit(f"__music_decode_{label}_rest:")
+            self.emit("LDA #$00")
+            self.emit("RTS")
+
+        emit_tonal_decoder("pulse1", "PULSE1", "__music_pattern_pulse1")
+        emit_tonal_decoder("pulse2", "PULSE2", "__music_pattern_pulse2")
+        emit_tonal_decoder("triangle", "TRIANGLE", "__music_pattern_triangle")
+
+        self.emit("")
+        self.emit("__music_decode_noise:")
+        self.emit("LDX __music_pattern_noise")
+        self.emit("LDA __music_pattern_step")
+        self.emit("CMP #$02")
+        self.emit("BCC __music_decode_noise_pair0")
+        self.emit("CMP #$04")
+        self.emit("BCC __music_decode_noise_pair1")
+        self.emit("CMP #$06")
+        self.emit("BCC __music_decode_noise_pair2")
+        self.emit("LDA _MUSIC_NOISE_PAIR3,X")
+        self.emit("JMP __music_decode_noise_packed")
+        for pair in range(3):
+            self.emit(f"__music_decode_noise_pair{pair}:")
+            self.emit(f"LDA _MUSIC_NOISE_PAIR{pair},X")
+            self.emit("JMP __music_decode_noise_packed")
+        self.emit("__music_decode_noise_packed:")
+        self.emit("TAX")
+        self.emit("LDA __music_pattern_step")
+        self.emit("AND #$01")
+        self.emit("BNE __music_decode_noise_low")
+        self.emit("TXA")
+        self.emit("LSR A")
+        self.emit("LSR A")
+        self.emit("LSR A")
+        self.emit("LSR A")
+        self.emit("RTS")
+        self.emit("__music_decode_noise_low:")
+        self.emit("TXA")
+        self.emit("AND #$0F")
+        self.emit("RTS")
+
+        self.emit_music_timer_table("__music_pulse_timer_lo", MUSIC_PULSE_TIMERS, False)
+        self.emit_music_timer_table("__music_pulse_timer_hi", MUSIC_PULSE_TIMERS, True)
+        self.emit_music_timer_table("__music_triangle_timer_lo", MUSIC_TRIANGLE_TIMERS, False)
+        self.emit_music_timer_table("__music_triangle_timer_hi", MUSIC_TRIANGLE_TIMERS, True)
+
+    def emit_music_transport(self) -> None:
+        """Pause and resume the song without losing its position.
+
+        Both drivers gate on __music_enabled and keep every bit of song state
+        in RAM, so pausing only has to clear the flag and silence the four
+        channels the driver owns.  The cached notes are invalidated so the
+        first step after a resume retriggers the channels instead of assuming
+        they are still sounding.  Sound effects keep playing while paused:
+        _sfx_tick rewrites pulse 2 every frame regardless of this flag.
+        """
+
+        self.emit("")
+        self.emit("_music_pause:")
+        self.emit("LDA __music_enabled")
+        self.emit("BNE __music_pause_active")
+        self.emit("RTS")
+        self.emit("__music_pause_active:")
+        self.emit("LDA #$00")
+        self.emit("STA __music_enabled")
+        # The same silent register values the driver writes for a rest.
+        self.emit("LDA #$70")
+        self.emit("STA $4000")
+        self.emit("LDA #$30")
+        self.emit("STA $4004")
+        self.emit("LDA #$80")
+        self.emit("STA $4008")
+        self.emit("LDA #$00")
+        self.emit("STA $400A")
+        self.emit("STA $400B")
+        self.emit("LDA #$30")
+        self.emit("STA $400C")
+        self.emit("LDA #$FF")
+        self.emit("STA __music_last_pulse1")
+        self.emit("STA __music_last_pulse2")
+        self.emit("STA __music_last_triangle")
+        self.emit("RTS")
+
+        self.emit("")
+        self.emit("_music_resume:")
+        self.emit("LDA __music_enabled")
+        self.emit("BEQ __music_resume_paused")
+        self.emit("RTS")
+        self.emit("__music_resume_paused:")
+        self.emit("LDA #$FF")
+        self.emit("STA __music_last_pulse1")
+        self.emit("STA __music_last_pulse2")
+        self.emit("STA __music_last_triangle")
+        self.emit("LDA #$0F")
+        self.emit("STA $4015")
+        self.emit("LDA #$01")
+        self.emit("STA __music_enabled")
+        self.emit("RTS")
+
+    def emit_music_runtime(self) -> None:
+        if self.music_compressed:
+            self.emit_compressed_music_runtime()
+            return
+        self.emit("")
+        self.emit("_music_init:")
+        self.emit("LDA #$00")
+        self.emit("STA __music_enabled")
+        self.emit("STA __music_step")
+        self.emit("STA __music_phase")
+        self.emit("LDA #$01")
+        self.emit("STA __music_frames")
+        self.emit("LDA #$FF")
+        self.emit("STA __music_last_pulse1")
+        self.emit("STA __music_last_pulse2")
+        self.emit("STA __music_last_triangle")
+        self.emit("LDA #$70")
+        self.emit("STA $4000")
+        self.emit("LDA #$08")
+        self.emit("STA $4001")
+        self.emit("LDA #$30")
+        self.emit("STA $4004")
+        self.emit("LDA #$08")
+        self.emit("STA $4005")
+        self.emit("LDA #$80")
+        self.emit("STA $4008")
+        self.emit("LDA #$30")
+        self.emit("STA $400C")
+        self.emit("LDA #$0F")
+        self.emit("STA $4015")
+        self.emit("LDA #$01")
+        self.emit("STA __music_enabled")
+        self.emit("RTS")
+
+        self.emit_music_transport()
+
+        self.emit("")
+        self.emit("_music_tick:")
+        self.emit("LDA __music_enabled")
+        self.emit("BNE __music_tick_active")
+        self.emit("RTS")
+        self.emit("__music_tick_active:")
+        self.emit("DEC __music_frames")
+        self.emit("BEQ __music_step_due")
+        self.emit("RTS")
+        self.emit("__music_step_due:")
+        self.emit("LDA __music_phase")
+        self.emit("BEQ __music_use_seven_frames")
+        self.emit("LDA #$06")
+        self.emit("STA __music_frames")
+        self.emit("LDA #$00")
+        self.emit("STA __music_phase")
+        self.emit("JMP __music_play_step")
+        self.emit("__music_use_seven_frames:")
+        self.emit("LDA #$07")
+        self.emit("STA __music_frames")
+        self.emit("LDA #$01")
+        self.emit("STA __music_phase")
+        self.emit("__music_play_step:")
+
+        # Pulse 1: 25 percent duty, constant volume 11.
+        self.emit("LDX __music_step")
+        self.emit("LDA _MUSIC_PULSE1,X")
+        self.emit("CMP __music_last_pulse1")
+        self.emit("BEQ __music_pulse1_done")
+        self.emit("STA __music_last_pulse1")
+        self.emit("CMP #$1D")
+        self.emit("BCC __music_pulse1_rest")
+        self.emit("CMP #$60")
+        self.emit("BCS __music_pulse1_rest")
+        self.emit("SEC")
+        self.emit("SBC #$1D")
+        self.emit("TAX")
+        self.emit("LDA #$7B")
+        self.emit("STA $4000")
+        self.emit("LDA __music_pulse_timer_lo,X")
+        self.emit("STA $4002")
+        self.emit("LDA __music_pulse_timer_hi,X")
+        self.emit("ORA #$F8")
+        self.emit("STA $4003")
+        self.emit("JMP __music_pulse1_done")
+        self.emit("__music_pulse1_rest:")
+        self.emit("LDA #$70")
+        self.emit("STA $4000")
+        self.emit("__music_pulse1_done:")
+
+        # Pulse 2: 12.5 percent duty, constant volume 6.
+        self.emit("LDX __music_step")
+        self.emit("LDA _MUSIC_PULSE2,X")
+        self.emit("CMP __music_last_pulse2")
+        self.emit("BEQ __music_pulse2_done")
+        self.emit("STA __music_last_pulse2")
+        self.emit("CMP #$1D")
+        self.emit("BCC __music_pulse2_rest")
+        self.emit("CMP #$60")
+        self.emit("BCS __music_pulse2_rest")
+        self.emit("SEC")
+        self.emit("SBC #$1D")
+        self.emit("TAX")
+        self.emit("LDA #$36")
+        self.emit("STA $4004")
+        self.emit("LDA __music_pulse_timer_lo,X")
+        self.emit("STA $4006")
+        self.emit("LDA __music_pulse_timer_hi,X")
+        self.emit("ORA #$F8")
+        self.emit("STA $4007")
+        self.emit("JMP __music_pulse2_done")
+        self.emit("__music_pulse2_rest:")
+        self.emit("LDA #$30")
+        self.emit("STA $4004")
+        self.emit("__music_pulse2_done:")
+
+        # Triangle has a divide-by-32 timer, unlike the pulse channels.
+        self.emit("LDX __music_step")
+        self.emit("LDA _MUSIC_TRIANGLE,X")
+        self.emit("CMP __music_last_triangle")
+        self.emit("BEQ __music_triangle_done")
+        self.emit("STA __music_last_triangle")
+        self.emit("CMP #$1D")
+        self.emit("BCC __music_triangle_rest")
+        self.emit("CMP #$60")
+        self.emit("BCS __music_triangle_rest")
+        self.emit("SEC")
+        self.emit("SBC #$1D")
+        self.emit("TAX")
+        self.emit("LDA #$FF")
+        self.emit("STA $4008")
+        self.emit("LDA __music_triangle_timer_lo,X")
+        self.emit("STA $400A")
+        self.emit("LDA __music_triangle_timer_hi,X")
+        self.emit("ORA #$F8")
+        self.emit("STA $400B")
+        self.emit("JMP __music_triangle_done")
+        self.emit("__music_triangle_rest:")
+        self.emit("LDA #$80")
+        self.emit("STA $4008")
+        self.emit("LDA #$00")
+        self.emit("STA $400A")
+        self.emit("STA $400B")
+        self.emit("__music_triangle_done:")
+
+        # Noise is intentionally retriggered every step, even when two
+        # adjacent percussion codes match.
+        self.emit("LDX __music_step")
+        self.emit("LDA _MUSIC_NOISE,X")
+        self.emit("CMP #$01")
+        self.emit("BEQ __music_noise_closed_hat")
+        self.emit("CMP #$02")
+        self.emit("BEQ __music_noise_open_hat")
+        self.emit("CMP #$03")
+        self.emit("BEQ __music_noise_kick")
+        self.emit("CMP #$04")
+        self.emit("BEQ __music_noise_snare")
+        self.emit("CMP #$05")
+        self.emit("BEQ __music_noise_tom")
+        self.emit("CMP #$06")
+        self.emit("BEQ __music_noise_cymbal")
+        self.emit("LDA #$30")
+        self.emit("STA $400C")
+        self.emit("JMP __music_noise_done")
+        self.emit("__music_noise_closed_hat:")
+        self.emit("LDA #$34")
+        self.emit("STA $400C")
+        self.emit("LDA #$82")
+        self.emit("STA $400E")
+        self.emit("JMP __music_noise_trigger")
+        self.emit("__music_noise_open_hat:")
+        self.emit("LDA #$35")
+        self.emit("STA $400C")
+        self.emit("LDA #$84")
+        self.emit("STA $400E")
+        self.emit("JMP __music_noise_trigger")
+        self.emit("__music_noise_kick:")
+        self.emit("LDA #$3F")
+        self.emit("STA $400C")
+        self.emit("LDA #$0E")
+        self.emit("STA $400E")
+        self.emit("JMP __music_noise_trigger")
+        self.emit("__music_noise_snare:")
+        self.emit("LDA #$3C")
+        self.emit("STA $400C")
+        self.emit("LDA #$06")
+        self.emit("STA $400E")
+        self.emit("JMP __music_noise_trigger")
+        self.emit("__music_noise_tom:")
+        self.emit("LDA #$3A")
+        self.emit("STA $400C")
+        self.emit("LDA #$0B")
+        self.emit("STA $400E")
+        self.emit("JMP __music_noise_trigger")
+        self.emit("__music_noise_cymbal:")
+        self.emit("LDA #$37")
+        self.emit("STA $400C")
+        self.emit("LDA #$83")
+        self.emit("STA $400E")
+        self.emit("__music_noise_trigger:")
+        self.emit("LDA #$F8")
+        self.emit("STA $400F")
+        self.emit("__music_noise_done:")
+        self.emit("INC __music_step")
+        self.emit("RTS")
+
+        self.emit_music_timer_table("__music_pulse_timer_lo", MUSIC_PULSE_TIMERS, False)
+        self.emit_music_timer_table("__music_pulse_timer_hi", MUSIC_PULSE_TIMERS, True)
+        self.emit_music_timer_table("__music_triangle_timer_lo", MUSIC_TRIANGLE_TIMERS, False)
+        self.emit_music_timer_table("__music_triangle_timer_hi", MUSIC_TRIANGLE_TIMERS, True)
+
+    def emit_music_timer_table(self, label: str, timers: Sequence[int], high: bool) -> None:
+        self.emit(f"{label}:")
+        values = [((timer >> 8) if high else timer) & 0xFF for timer in timers]
+        for i in range(0, len(values), 16):
+            self.emit(".byte " + ", ".join(f"${value:02X}" for value in values[i : i + 16]))
+
+    def emit_sfx_runtime(self) -> None:
+        """Frame-driven sound effects that borrow pulse 2 from the song.
+
+        Each effect is a run of frames in SFX_CTRL/SFX_TIMER_LO/SFX_TIMER_HI;
+        SFX_START and SFX_LENGTH locate that run by effect id.  While an effect
+        plays it overwrites whatever the music driver put on pulse 2 in the same
+        NMI, and when it finishes the channel is released back to the song.
+        """
+
+        self.emit("")
+        self.emit("_sfx_play:")
+        self.emit(f"LDA {self.sfx_runtime_param}")
+        self.emit("BEQ __sfx_play_stop")
+        self.emit(f"CMP #${SFX_SLOTS:02X}")
+        self.emit("BCS __sfx_play_stop")
+        self.emit("TAX")
+        self.emit("LDA _SFX_LENGTH,X")
+        self.emit("BEQ __sfx_play_stop")
+        # Park the driver before repointing it so an NMI landing mid-update
+        # cannot play one effect's frames with another effect's length.
+        self.emit("LDY #$00")
+        self.emit("STY __sfx_left")
+        self.emit("TAY")
+        self.emit("LDA _SFX_START,X")
+        self.emit("STA __sfx_pos")
+        self.emit("LDA #$FF")
+        self.emit("STA __sfx_hi")
+        self.emit("STY __sfx_left")
+        self.emit("RTS")
+        self.emit("__sfx_play_stop:")
+        self.emit("LDA #$00")
+        self.emit("STA __sfx_left")
+        self.emit("JMP __sfx_release")
+        self.emit("")
+        self.emit("_sfx_tick:")
+        self.emit("LDA __sfx_left")
+        self.emit("BNE __sfx_tick_active")
+        self.emit("RTS")
+        self.emit("__sfx_tick_active:")
+        self.emit("LDX __sfx_pos")
+        self.emit("LDA _SFX_CTRL,X")
+        self.emit("STA $4004")
+        self.emit("LDA _SFX_TIMER_LO,X")
+        self.emit("STA $4006")
+        # $4007 restarts the phase, so it is only rewritten when the high timer
+        # bits actually change.  Sustained effect tones stay clean that way.
+        self.emit("LDA _SFX_TIMER_HI,X")
+        self.emit("CMP __sfx_hi")
+        self.emit("BEQ __sfx_tick_advance")
+        self.emit("STA __sfx_hi")
+        self.emit("ORA #$F8")
+        self.emit("STA $4007")
+        self.emit("__sfx_tick_advance:")
+        self.emit("INC __sfx_pos")
+        self.emit("DEC __sfx_left")
+        self.emit("BNE __sfx_tick_done")
+        self.emit("JMP __sfx_release")
+        self.emit("__sfx_tick_done:")
+        self.emit("RTS")
+        self.emit("")
+        self.emit("__sfx_release:")
+        self.emit("LDA #$30")
+        self.emit("STA $4004")
+        if self.music_runtime:
+            # Invalidate the cached note so the next song step retriggers the
+            # channel instead of assuming it is still sounding.
+            self.emit("LDA #$FF")
+            self.emit("STA __music_last_pulse2")
         self.emit("RTS")
 
     def emit_render_queue_helper(self) -> None:
@@ -1447,6 +2406,70 @@ class CodeGenerator:
         self.emit("LDA #$00")
         self.emit("STA _erase_count")
         self.emit("STA _draw_count")
+        self.emit("RTS")
+
+    def emit_preview_runtime(self) -> None:
+        self.emit("")
+        self.emit("_ppu_write_preview:")
+        self.emit("LDA $2002")
+        self.emit("LDX #$00")
+        for high, low in ((0x20, 0xF7), (0x21, 0x17), (0x21, 0x37), (0x21, 0x57)):
+            self.emit(f"LDA #${high:02X}")
+            self.emit("STA $2006")
+            self.emit(f"LDA #${low:02X}")
+            self.emit("STA $2006")
+            for _ in range(4):
+                self.emit("LDA _preview_tiles,X")
+                self.emit("STA $2007")
+                self.emit("INX")
+        self.emit("LDA #$00")
+        self.emit("STA $2005")
+        self.emit("STA $2005")
+        self.emit("RTS")
+
+    def emit_board_runtime(self) -> None:
+        self.emit("")
+        self.emit("_ppu_write_board_half:")
+        self.emit("LDA $2002")
+        self.emit(f"LDA {self.board_runtime_param}")
+        self.emit("CMP #$03")
+        self.emit("BNE __ppu_write_board_check_two")
+        self.emit("JMP __ppu_write_board_quarter_three")
+        self.emit("__ppu_write_board_check_two:")
+        self.emit("CMP #$02")
+        self.emit("BNE __ppu_write_board_check_one")
+        self.emit("JMP __ppu_write_board_quarter_two")
+        self.emit("__ppu_write_board_check_one:")
+        self.emit("CMP #$01")
+        self.emit("BEQ __ppu_write_board_select_one")
+        self.emit("JMP __ppu_write_board_quarter_zero")
+        self.emit("__ppu_write_board_select_one:")
+        self.emit("JMP __ppu_write_board_quarter_one")
+
+        # Five rows per vblank leave ample time for a simultaneous full music
+        # decoder tick.  The public helper keeps its historical name so older
+        # source remains source-compatible; its selector now accepts 0..3.
+        for quarter in (3, 2, 1, 0):
+            self.emit(f"__ppu_write_board_quarter_{('zero', 'one', 'two', 'three')[quarter]}:")
+            self.emit(f"LDX #${quarter * 50:02X}")
+            for row in range(4 + quarter * 5, 9 + quarter * 5):
+                address = 0x2000 + (row * 32) + 10
+                self.emit(f"LDA #${(address >> 8) & 0xFF:02X}")
+                self.emit("STA $2006")
+                self.emit(f"LDA #${address & 0xFF:02X}")
+                self.emit("STA $2006")
+                self.emit("JSR __ppu_write_board_row")
+            self.emit("JMP __ppu_write_board_done")
+        self.emit("__ppu_write_board_done:")
+        self.emit("LDA #$00")
+        self.emit("STA $2005")
+        self.emit("STA $2005")
+        self.emit("RTS")
+        self.emit("__ppu_write_board_row:")
+        for _ in range(10):
+            self.emit("LDA _board,X")
+            self.emit("STA $2007")
+            self.emit("INX")
         self.emit("RTS")
 
     def emit(self, line: str) -> None:
@@ -1573,7 +2596,7 @@ class Assembler:
     def __init__(self):
         self.symbols: Dict[str, int] = {}
         self.ram_pc = 0x0200
-        self.pc = 0x8000
+        self.pc = PRG_BASE
 
     def assemble(self, asm: str) -> bytes:
         lines = self.parse_lines(asm)
@@ -1604,7 +2627,7 @@ class Assembler:
         return out
 
     def pass1(self, lines: Sequence[AsmLine]) -> None:
-        self.pc = 0x8000
+        self.pc = PRG_BASE
         for line in lines:
             if line.op == ".RAM":
                 parts = line.operand.split()
@@ -1637,8 +2660,8 @@ class Assembler:
                 self.pc += self.instruction_size(line)
 
     def pass2(self, lines: Sequence[AsmLine]) -> bytes:
-        self.pc = 0x8000
-        prg = bytearray([0xEA] * 0x4000)
+        self.pc = PRG_BASE
+        prg = bytearray([0xEA] * PRG_SIZE)
         for line in lines:
             if line.op is None or line.op == ".RAM":
                 continue
@@ -1729,9 +2752,9 @@ class Assembler:
         raise CompileError(f"unknown assembly symbol or value {text!r}")
 
     def write_byte(self, prg: bytearray, value: int) -> None:
-        if not 0x8000 <= self.pc <= 0xBFFF:
-            raise CompileError(f"assembly writes outside 16K PRG ROM at ${self.pc:04X}")
-        prg[self.pc - 0x8000] = value & 0xFF
+        if not PRG_BASE <= self.pc <= PRG_BASE + PRG_SIZE - 1:
+            raise CompileError(f"assembly writes outside 32K PRG ROM at ${self.pc:04X}")
+        prg[self.pc - PRG_BASE] = value & 0xFF
         self.pc += 1
 
 
@@ -1753,12 +2776,23 @@ def make_chr() -> bytes:
             chr_rom[base + row] = lo
             chr_rom[base + 8 + row] = hi
 
+    # Seven polished block faces with a one-pixel grid gap and NES-style bevel.
     for tile in range(1, 8):
-        color = ((tile - 1) % 3) + 1
         pixels = [[0 for _ in range(8)] for _ in range(8)]
-        for row in range(1, 7):
-            for col in range(1, 7):
-                pixels[row][col] = color
+        for row in range(7):
+            for col in range(7):
+                if row == 0 or col == 0:
+                    pixels[row][col] = 3
+                elif row == 6 or col == 6:
+                    pixels[row][col] = 1
+                else:
+                    pixels[row][col] = 2
+
+        # A tiny embossed mark makes all seven pieces readable in monochrome.
+        mark_col = 2 + ((tile - 1) % 3)
+        mark_row = 2 + (((tile - 1) // 3) % 2)
+        pixels[mark_row][mark_col] = 3
+        pixels[mark_row + 1][mark_col + 1] = 1
         put_tile(tile, pixels)
 
     frame = [[0 for _ in range(8)] for _ in range(8)]
@@ -1768,20 +2802,174 @@ def make_chr() -> bytes:
                 frame[row][col] = 1
     put_tile(8, frame)
 
-    for tile in range(9, 256):
+    # Keep the legacy utility tiles used by the other examples.
+    for tile in range(9, 16):
         color = ((tile - 1) % 3) + 1
         pixels = [[color for _ in range(8)] for _ in range(8)]
+        put_tile(tile, pixels)
+
+    font_5x7 = {
+        "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+        "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
+        "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
+        "3": ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
+        "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
+        "5": ("11111", "10000", "10000", "11110", "00001", "00001", "11110"),
+        "6": ("01110", "10000", "10000", "11110", "10001", "10001", "01110"),
+        "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+        "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
+        "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
+        "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+        "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
+        "C": ("01111", "10000", "10000", "10000", "10000", "10000", "01111"),
+        "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+        "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+        "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
+        "G": ("01111", "10000", "10000", "10111", "10001", "10001", "01111"),
+        "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
+        "I": ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
+        "J": ("00001", "00001", "00001", "00001", "10001", "10001", "01110"),
+        "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
+        "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
+        "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
+        "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+        "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+        "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+        "Q": ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
+        "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+        "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+        "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
+        "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+        "V": ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
+        "W": ("10001", "10001", "10001", "10101", "10101", "10101", "01010"),
+        "X": ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
+        "Y": ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
+        "Z": ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
+        "-": ("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
+        ":": ("00000", "00100", "00100", "00000", "00100", "00100", "00000"),
+    }
+
+    def put_glyph(tile: int, rows: Sequence[str]) -> None:
+        pixels = [[0 for _ in range(8)] for _ in range(8)]
+        for row, bits in enumerate(rows):
+            for col, bit in enumerate(bits):
+                if bit == "1":
+                    pixels[row][col + 1] = 3
+        put_tile(tile, pixels)
+
+    for value in range(10):
+        put_glyph(16 + value, font_5x7[str(value)])
+    for value in range(26):
+        put_glyph(26 + value, font_5x7[chr(ord("A") + value)])
+    put_glyph(52, font_5x7["-"])
+    put_glyph(53, font_5x7[":"])
+
+    def rail_tile(horizontal: bool, vertical: bool, right: bool, bottom: bool) -> List[List[int]]:
+        pixels = [[0 for _ in range(8)] for _ in range(8)]
+        if horizontal:
+            start = (0 if right else 2) if vertical else 0
+            end = (6 if right else 8) if vertical else 8
+            for col in range(start, end):
+                pixels[2][col] = 3
+                pixels[3][col] = 2
+                pixels[4][col] = 2
+                pixels[5][col] = 1
+        if vertical:
+            start = (0 if bottom else 2) if horizontal else 0
+            end = (6 if bottom else 8) if horizontal else 8
+            for row in range(start, end):
+                pixels[row][2] = 3
+                pixels[row][3] = 2
+                pixels[row][4] = 2
+                pixels[row][5] = 1
+        return pixels
+
+    put_tile(54, rail_tile(True, True, False, False))
+    put_tile(55, rail_tile(True, False, True, True))
+    put_tile(56, rail_tile(True, True, True, False))
+    put_tile(57, rail_tile(False, True, True, True))
+    put_tile(58, rail_tile(False, True, True, True))
+    put_tile(59, rail_tile(True, True, False, True))
+    put_tile(60, rail_tile(True, False, True, True))
+    put_tile(61, rail_tile(True, True, True, True))
+
+    sparkle = [[0 for _ in range(8)] for _ in range(8)]
+    for row, col in ((1, 3), (2, 3), (3, 1), (3, 2), (3, 3), (3, 4), (3, 5), (4, 3), (5, 3)):
+        sparkle[row][col] = 3 if row == 3 or col == 3 else 2
+    put_tile(62, sparkle)
+
+    flash = [[0 for _ in range(8)] for _ in range(8)]
+    for row in range(1, 7):
+        for col in range(1, 7):
+            flash[row][col] = 3 if (row + col) % 2 == 0 else 2
+    put_tile(63, flash)
+
+    # Six 16x16 beveled glyphs, split into four tiles each, form the title logo.
+    for letter_index, letter in enumerate("TETRIS"):
+        mask = [[False for _ in range(16)] for _ in range(16)]
+        for row, bits in enumerate(font_5x7[letter]):
+            for col, bit in enumerate(bits):
+                if bit == "1":
+                    for dy in range(2):
+                        for dx in range(2):
+                            mask[1 + row * 2 + dy][3 + col * 2 + dx] = True
+        canvas = [[0 for _ in range(16)] for _ in range(16)]
+        for row in range(16):
+            for col in range(16):
+                if not mask[row][col]:
+                    continue
+                top_or_left = (
+                    row == 0
+                    or col == 0
+                    or not mask[row - 1][col]
+                    or not mask[row][col - 1]
+                )
+                bottom_or_right = (
+                    row == 15
+                    or col == 15
+                    or not mask[row + 1][col]
+                    or not mask[row][col + 1]
+                )
+                canvas[row][col] = 3 if top_or_left else (1 if bottom_or_right else 2)
+        base_tile = 64 + letter_index * 4
+        for tile_row in range(2):
+            for tile_col in range(2):
+                pixels = [
+                    canvas[tile_row * 8 + row][tile_col * 8 : tile_col * 8 + 8]
+                    for row in range(8)
+                ]
+                put_tile(base_tile + tile_row * 2 + tile_col, pixels)
+
+    # Preserve deterministic filler tiles for programs that use raw tile IDs.
+    for tile in range(88, 256):
+        color = ((tile - 1) % 3) + 1
+        pixels = [[color for _ in range(8)] for _ in range(8)]
+        put_tile(tile, pixels)
+
+    # Menu furniture: selector arrows, an entry caret, and a name-slot rule.
+    menu_glyphs = {
+        88: ("........", "....2...", "...23...", "..233...", "...23...", "....2...", "........", "........"),
+        89: ("........", "...2....", "...32...", "...332..", "...32...", "...2....", "........", "........"),
+        90: ("........", "...33...", "..3223..", ".32..23.", "........", "........", "........", "........"),
+        91: ("........", "........", "........", "........", "........", "........", ".111111.", "........"),
+    }
+    for tile, rows in menu_glyphs.items():
+        pixels = [[0 for _ in range(8)] for _ in range(8)]
+        for row, bits in enumerate(rows):
+            for col, bit in enumerate(bits):
+                if bit != ".":
+                    pixels[row][col] = int(bit)
         put_tile(tile, pixels)
     return bytes(chr_rom)
 
 
 def make_ines(prg: bytes, chr_rom: bytes) -> bytes:
-    if len(prg) != 0x4000:
-        raise CompileError("expected one 16K PRG bank")
-    if len(chr_rom) != 0x2000:
+    if len(prg) != PRG_SIZE:
+        raise CompileError("expected one 32K PRG image")
+    if len(chr_rom) != CHR_SIZE:
         raise CompileError("expected one 8K CHR bank")
     header = bytearray(b"NES\x1A")
-    header.extend([1, 1, 0, 0])
+    header.extend([PRG_BANKS, 1, 0, 0])
     header.extend([0] * 8)
     return bytes(header) + prg + chr_rom
 

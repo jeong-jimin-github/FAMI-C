@@ -76,11 +76,11 @@
         <div><strong>AST</strong><span>8-bit NES-oriented semantic model</span></div>
         <div><strong>6502 assembly</strong><span>Static locals, native runtime calls</span></div>
         <div><strong>PRG ROM</strong><span>Built-in 6502 assembler</span></div>
-        <div><strong>iNES ROM</strong><span>NROM-128 mapper 0 package</span></div>
+        <div><strong>iNES ROM</strong><span>NROM-256 mapper 0 package</span></div>
       </div>
       <p>
         FAMI-C is intentionally self-contained. The compiler emits assembly, the assembler resolves labels
-        and vectors, and the packager writes a 16 KB PRG + 8 KB CHR iNES image.
+        and vectors, and the packager writes a 32 KB PRG + 8 KB CHR iNES image.
       </p>
     </section>
 
@@ -102,7 +102,8 @@
             <pre><code>extern void wait_vblank(void);
 extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
 extern unsigned char read_pad(void);
-extern unsigned char rand8(void);</code></pre>
+extern unsigned char rand8(void);
+extern void sfx_play(unsigned char effect);</code></pre>
           </article>
           <article>
             <h3>Current Limits</h3>
@@ -110,7 +111,7 @@ extern unsigned char rand8(void);</code></pre>
               <li>Arithmetic ABI is 8-bit.</li>
               <li>Locals are statically allocated; recursion is not supported.</li>
               <li>Pointers, structs, casts, varargs, and libc are not implemented.</li>
-              <li>Generated ROMs target mapper 0 / NROM-128.</li>
+              <li>Generated ROMs target mapper 0 / NROM-256.</li>
             </ul>
           </article>
         </div>
@@ -121,23 +122,33 @@ extern unsigned char rand8(void);</code></pre>
       <h2>Example: Tetris</h2>
       <p>
         The example in <code>examples/tetris.c</code> demonstrates static arrays, ROM lookup tables,
-        controller polling, collision checks, line clearing, and vblank-safe PPU updates.
+        controller polling, collision checks, line clearing, and vblank-safe PPU updates. Its
+        presentation uses multiple palettes, beveled blocks, directional borders, framed HUD
+        panels, a large title logo, a start-level picker, and a best-player table with
+        name entry.
       </p>
       <div class="columns">
         <article>
           <h3>Controls</h3>
           <ul>
+            <li>Title: Left / Right picks the start level by one, Up / Down by five</li>
             <li>Left / Right: move piece</li>
             <li>Down: soft drop</li>
-            <li>A: rotate</li>
+            <li>Up: hard drop</li>
+            <li>A / B: rotate clockwise / counter-clockwise</li>
+            <li>Start: begin, pause/resume, or confirm a best-score name</li>
           </ul>
         </article>
         <article>
-          <h3>Verified With</h3>
+          <h3>NES Presentation and Systems</h3>
           <ul>
-            <li>Mesen 2.2.1 on Windows</li>
-            <li>Automated Python unit tests</li>
-            <li>iNES header and vector checks</li>
+            <li>Fair 7-bag driven by a 16-bit LFSR and controller/input timing</li>
+            <li>Rotation states that are true rotations about a fixed pivot, never mirrored</li>
+            <li>Start-level picker and a three-entry best-player table with name entry</li>
+            <li>Sound effects that borrow pulse 2 from the song and hand it back</li>
+            <li>Multi-palette beveled UI with a NEXT preview, TOP panel, and line-clear flash</li>
+            <li>Full 4:26.127 musical section arranged for all four 2A03 channels</li>
+            <li>Source MIDI: 4:29.605 including the initial silence</li>
           </ul>
         </article>
       </div>

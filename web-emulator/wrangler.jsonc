@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jsnes",
+  "compatibility_date": "2026-05-16",
+  "observability": {
+    "enabled": true
+  },
+  // Upload the *built* site, not the `web/` source tree. The static site is
+  // produced by the Cloudflare build command (`npm run build` in `web/`,
+  // which runs `vite build`). Pointing at `web` instead makes Wrangler walk
+  // `web/node_modules/jsnes` -- a symlink back to the repo root (the
+  // `"jsnes": "file:.."` dependency) -- recursing forever -> ELOOP.
+  // This path is resolved relative to the location of this config file.
+  "assets": {
+    "directory": "web/dist",
+    // React Router SPA: serve index.html for unknown paths so deep links work.
+    "not_found_handling": "single-page-application"
+  },
+  "compatibility_flags": [
+    "nodejs_compat"
+  ]
+}

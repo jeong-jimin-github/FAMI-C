@@ -1,0 +1,20 @@
+version: 2
+updates:
+- package-ecosystem: npm
+  directory: "/"
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 10
+- package-ecosystem: npm
+  directory: "/web"
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 10
+  # Group related packages so they update together in a single PR. React and
+  # react-dom must be on the exact same version or the app fails to start, so
+  # they must always be bumped in tandem.
+  groups:
+    react:
+      patterns:
+        - "react"
+        - "react-dom"

@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    background-color: black;
+    color: #f8f9fa;
+  }
+
+  a {
+    color: #f8f9fa;
+    text-decoration: underline;
+  }
+
+  a:hover {
+    color: #adb5bd;
+  }
+
+  h1 {
+    font-size: 2.5rem;
+  }
+}

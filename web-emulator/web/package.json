@@ -1,0 +1,35 @@
+{
+  "name": "jsnes-web",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "dependencies": {
+    "jsnes": "file:..",
+    "prop-types": "^15.8.1",
+
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@vitejs/plugin-react": "^6.0.3",
+    "jsdom": "^29.1.1",
+"tailwindcss": "^4.3.2",
+    "vite": "^8.1.3",
+    "vitest": "^4.1.10"
+  },
+  "scripts": {
+    "sync-roms": "node scripts/sync-roms.mjs",
+    "prestart": "npm run sync-roms",
+    "start": "vite",
+    "predev": "npm run sync-roms",
+    "dev": "vite",
+    "prebuild": "npm run sync-roms",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  }
+}

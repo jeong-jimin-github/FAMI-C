@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Embedding Example</title>
+    <!-- For local development: npm run build && npx serve . -->
+    <!-- <script type="text/javascript" src="../dist/jsnes.min.js"></script> -->
+    <script
+      type="text/javascript"
+      src="https://unpkg.com/jsnes@2/dist/jsnes.min.js"
+    ></script>
+    <script>
+      window.onload = function () {
+        var browser = new jsnes.Browser({
+          container: document.getElementById("nes"),
+          onError: function (e) {
+            console.error(e);
+          },
+        });
+        jsnes.Browser.loadROMFromURL(
+          "../roms/lj65/lj65.nes",
+          function (err, data) {
+            if (err) {
+              console.error(err);
+              return;
+            }
+            browser.loadROM(data);
+          },
+        );
+      };
+    </script>
+  </head>
+  <body>
+    <div id="nes" style="margin: auto; width: 512px; height: 480px"></div>
+    <p>
+      DPad: Arrow keys<br />
+      Start: Enter, Select: Right Ctrl<br />
+      A: X, B: Z
+    </p>
+  </body>
+</html>

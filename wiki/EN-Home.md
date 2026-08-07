@@ -18,4 +18,5 @@ FAMI-C is a self-contained toolchain for writing NES / Famicom 6502 programs in 
 - Tetris-style example game in `examples/tetris.c`.
 - Metatile platformer example game in `examples/platformer.c`.
 - Verified in Mesen 2.2.1.
+- Both examples are playable in the browser on the [Pages site](https://jeong-jimin-github.github.io/FAMI-C/#play).
 

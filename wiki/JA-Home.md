@@ -18,4 +18,5 @@ FAMI-C は NES / ファミコン向けの 6502 プログラムを C で書き、
 - `examples/tetris.c` にテトリス風のサンプルゲームがあります。
 - `examples/platformer.c` にメタタイル方式のプラットフォーマーがあります。
 - Mesen 2.2.1 で実機に近い動作確認を行っています。
+- 2 つのサンプルは [Pages サイト](https://jeong-jimin-github.github.io/FAMI-C/#play)のブラウザーエミュレーターでそのまま遊べます。
 

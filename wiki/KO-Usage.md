@@ -26,6 +26,23 @@ Windows에서는 편의 스크립트도 사용할 수 있습니다.
 .\build.ps1
 ```
 
+## 브라우저에서 실행
+
+[GitHub Pages 사이트](https://jeong-jimin-github.github.io/FAMI-C/#play)에서
+[JSNES](https://github.com/bfirsh/jsnes)로 두 예제 ROM을 바로 실행할 수 있어,
+설치 없이 결과를 확인할 수 있습니다. 직접 빌드한 `.nes` 파일도 열 수 있으며,
+파일은 브라우저 밖으로 나가지 않습니다.
+
+방향키가 D-패드, `X`가 A, `Z`가 B, `Enter`가 Start, 오른쪽 `Ctrl`이 Select입니다.
+키 입력은 화면에 포커스가 있을 때만 게임으로 전달됩니다. 게임패드도 동작하고,
+터치 기기에서는 화면 조작 패드가 나타납니다.
+
+예제나 에뮬레이터를 수정했다면 사이트가 서비스하는 파일을 다시 생성합니다.
+
+```powershell
+python .\tools\build_pages.py
+```
+
 ## 컴파일러 확인
 
 ```powershell

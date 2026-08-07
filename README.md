@@ -12,6 +12,7 @@ and sound effects.
 
 ## Documentation
 
+- Play the examples in a browser: <https://jeong-jimin-github.github.io/FAMI-C/#play>
 - GitHub Pages: <https://jeong-jimin-github.github.io/FAMI-C/>
 - Wiki home: <https://github.com/jeong-jimin-github/FAMI-C/wiki>
 - 한국어 Wiki: <https://github.com/jeong-jimin-github/FAMI-C/wiki/KO-Home>
@@ -124,6 +125,28 @@ To run the gameplay and music smoke test in Mesen 2.2.1:
 python .\tools\run_mesen_smoke.py
 ```
 
+## Browser Demo
+
+The GitHub Pages site runs both example ROMs in the browser on
+[JSNES](https://github.com/bfirsh/jsnes), the JavaScript NES emulator vendored
+in `web-emulator/`. It also opens a `.nes` file you built yourself, which never
+leaves your machine. Keyboard, gamepad, and an on-screen pad on touch devices
+all drive controller 1.
+
+Pages serves `docs/` as it stands, so the ROMs and the emulator have to be
+committed inside it. Regenerate them whenever an example or the emulator
+changes:
+
+```powershell
+python .\tools\build_pages.py
+```
+
+That writes `docs/roms/*.nes` from `examples/*.c` and copies the JSNES sources
+into `docs/vendor/jsnes/`. The page loads them as plain ES modules, so there is
+no bundler and no install step. `--check` reports drift instead of writing, and
+`tests/test_pages.py` runs the same check, so a stale ROM fails the test suite
+rather than reaching the site.
+
 ## Supported C Model
 
 The NES backend supports:
@@ -190,6 +213,9 @@ const unsigned char SFX_TIMER_HI[N];    /* low three bits reach $4007 */
 - `tests/smoke.c` - tiny compiler smoke test
 - `tests/test_toolchain.py` - automated ROM/header/vector tests
 - `tests/test_platformer.py` - platformer stage, tile and physics tests
+- `tests/test_pages.py` - checks the published site and its generated assets
 - `build.ps1` - convenience build command for the Tetris ROM
-- `docs/` - GitHub Pages site
+- `tools/build_pages.py` - regenerates the ROMs and emulator the site serves
+- `docs/` - GitHub Pages site, including the in-browser emulator
+- `web-emulator/` - JSNES sources the site is built from
 - `wiki/` - source Markdown for the GitHub Wiki pages

@@ -12,5 +12,5 @@ Project links:
 
 - Repository: https://github.com/jeong-jimin-github/FAMI-C
 - GitHub Pages: https://jeong-jimin-github.github.io/FAMI-C/
-- Example game: `examples/tetris.c`
+- Example games: `examples/tetris.c`, `examples/platformer.c`
 

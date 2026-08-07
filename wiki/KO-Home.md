@@ -8,6 +8,7 @@ FAMI-C는 NES 및 패미컴용 6502 프로그램을 C로 작성하고 `.nes` ROM
 - [[지원 C 모델|KO-C-Language]]
 - [[컴파일러 아키텍처|KO-Architecture]]
 - [[테트리스 예제|KO-Tetris]]
+- [[플랫포머 예제|KO-Platformer]]
 
 ## 핵심 특징
 
@@ -15,6 +16,7 @@ FAMI-C는 NES 및 패미컴용 6502 프로그램을 C로 작성하고 `.nes` ROM
 - NES에 맞춘 8비트 ABI와 정적 메모리 모델을 사용합니다.
 - `wait_vblank`, `ppu_put`, `read_pad`, `rand8` 같은 기본 런타임 함수를 제공합니다.
 - 예제 테트리스 게임을 `examples/tetris.c`에서 제공합니다.
+- 예제 플랫포머 게임을 `examples/platformer.c`에서 제공합니다.
 - Mesen 2.2.1에서 실제 구동 검증했습니다.
 
 ## 빠른 시작

@@ -4,9 +4,11 @@ FAMI-C is a self-contained C compiler and ROM builder for the NES/Famicom
 6502. It parses a practical 8-bit C subset, emits 6502 assembly, assembles it,
 adds a small NES runtime, and writes a mapper-0 iNES ROM.
 
-The repository includes a complete Tetris-style NES game in
-`examples/tetris.c`, with a polished multi-palette interface, beveled blocks,
-and a four-channel 2A03 chiptune arrangement.
+The repository includes two complete NES games. `examples/tetris.c` is a
+Tetris-style game with a polished multi-palette interface, beveled blocks, and
+a four-channel 2A03 chiptune arrangement. `examples/platformer.c` is a
+four-stage metatile platformer with jumping, patrols, collectibles, spike pits
+and sound effects.
 
 ## Documentation
 
@@ -68,6 +70,41 @@ python .\tools\arrange_midi.py --input "$HOME\Downloads\slaop88c.mid" --embed-c 
 
 See `assets/MUSIC.md` for the source hash, arrangement details, and usage
 notice from the MIDI's embedded metadata.
+
+## Platformer Example
+
+```powershell
+python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm
+```
+
+The FAMI-C runtime draws backgrounds only, so the platformer is built on a
+16x16 metatile grid rather than on sprites: the screen is 16 cells wide and 15
+cells tall, cell row 0 is the status bar, and one cell is at once the unit of
+collision, of level storage, and of the attribute table. Cells therefore pick
+their own background palette, while the hero and the patrols are drawn in
+colour 3 only - which is white in all four palettes - so they stay readable
+wherever they walk.
+
+### Controls
+
+- D-pad left/right: walk
+- B (held): run
+- A: jump; releasing A during the rise cuts the jump short
+
+### Gameplay
+
+Four stages of gems, patrols, spike pits, bottomless gaps and an exit door.
+Landing on a patrol while falling squashes it and bounces the hero; touching
+one any other way, or entering spikes, or falling out of the stage, costs one
+of three lives. Gems score 100, a squashed patrol 200, and clearing a stage
+1000. Sound effects cover jumping, landing, gems, stomps, damage, stage clears
+and game over.
+
+Motion is frame-timed rather than sub-pixel: a walk step takes twelve frames,
+a jump rises three cells over sixteen, and the delay tables at the top of
+`examples/platformer.c` are the whole physics model. Only cells that actually
+changed are redrawn, through a queue that is flushed at most eight tiles per
+vblank so the PPU is never written to late.
 
 To run a compiler smoke test:
 
@@ -149,8 +186,10 @@ const unsigned char SFX_TIMER_HI[N];    /* low three bits reach $4007 */
 
 - `famic.py` - compiler, 6502 assembler, runtime, and iNES packager
 - `examples/tetris.c` - example NES/Famicom Tetris-style game
+- `examples/platformer.c` - example NES/Famicom platformer
 - `tests/smoke.c` - tiny compiler smoke test
 - `tests/test_toolchain.py` - automated ROM/header/vector tests
+- `tests/test_platformer.py` - platformer stage, tile and physics tests
 - `build.ps1` - convenience build command for the Tetris ROM
 - `docs/` - GitHub Pages site
 - `wiki/` - source Markdown for the GitHub Wiki pages

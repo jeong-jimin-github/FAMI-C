@@ -13,10 +13,11 @@ git clone https://github.com/jeong-jimin-github/FAMI-C.git
 cd FAMI-C
 ```
 
-## 테트리스 ROM 빌드
+## 예제 ROM 빌드
 
 ```powershell
 python .\famic.py build .\examples\tetris.c -o .\build\tetris.nes --asm .\build\tetris.asm
+python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm
 ```
 
 Windows에서는 편의 스크립트도 사용할 수 있습니다.

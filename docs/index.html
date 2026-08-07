@@ -55,8 +55,9 @@
             </ul>
           </article>
           <article>
-            <h3>Build Tetris</h3>
-            <pre><code>python .\famic.py build .\examples\tetris.c -o .\build\tetris.nes --asm .\build\tetris.asm</code></pre>
+            <h3>Build An Example</h3>
+            <pre><code>python .\famic.py build .\examples\tetris.c -o .\build\tetris.nes --asm .\build\tetris.asm
+python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm</code></pre>
             <p>Windows users can also run:</p>
             <pre><code>.\build.ps1</code></pre>
           </article>
@@ -149,6 +150,43 @@ extern void sfx_play(unsigned char effect);</code></pre>
             <li>Multi-palette beveled UI with a NEXT preview, TOP panel, and line-clear flash</li>
             <li>Full 4:26.127 musical section arranged for all four 2A03 channels</li>
             <li>Source MIDI: 4:29.605 including the initial silence</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap">
+      <h2>Example: Platformer</h2>
+      <p>
+        The example in <code>examples/platformer.c</code> shows what a background-only runtime can
+        still do. It is built on a 16x16 metatile grid - 16 cells across, 15 down, with cell row 0
+        as the status bar - so one cell is at once the unit of collision, of level storage, and of
+        the attribute table. Cells choose their own background palette, while the hero and the
+        patrols are drawn in colour 3 alone, which is white in all four palettes, so they stay
+        readable wherever they walk.
+      </p>
+      <pre><code>python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm</code></pre>
+      <div class="columns">
+        <article>
+          <h3>Controls</h3>
+          <ul>
+            <li>Left / Right: walk</li>
+            <li>B held: run</li>
+            <li>A: jump; release during the rise to cut it short</li>
+            <li>Start: begin a game, or restart after a game over</li>
+          </ul>
+        </article>
+        <article>
+          <h3>NES Presentation and Systems</h3>
+          <ul>
+            <li>Four stages of gems, patrols, spike pits, bottomless gaps and an exit door</li>
+            <li>Frame-timed physics: twelve frames per walk step, three cells of rise over sixteen</li>
+            <li>Variable jump height and mid-air control, with an apex hang that lets a jump reach a ledge</li>
+            <li>Stomping a patrol while falling squashes it and bounces the hero</li>
+            <li>Per-cell attributes packed from the level map when a stage loads</li>
+            <li>A redraw queue flushed at most eight tiles per vblank, so the PPU is never written late</li>
+            <li>Sound effects for jumps, landings, gems, stomps, damage, stage clears and game over</li>
+            <li>Title, stage intro, play, death, stage clear, game over and all-clear screens</li>
           </ul>
         </article>
       </div>

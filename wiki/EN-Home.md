@@ -8,6 +8,7 @@ FAMI-C is a self-contained toolchain for writing NES / Famicom 6502 programs in 
 - [[Supported C Model|EN-C-Language]]
 - [[Compiler Architecture|EN-Architecture]]
 - [[Tetris Example|EN-Tetris]]
+- [[Platformer Example|EN-Platformer]]
 
 ## Highlights
 
@@ -15,5 +16,6 @@ FAMI-C is a self-contained toolchain for writing NES / Famicom 6502 programs in 
 - 8-bit ABI and static memory model designed for NES constraints.
 - Runtime functions for vblank waiting, PPU writes, controller input, and random values.
 - Tetris-style example game in `examples/tetris.c`.
+- Metatile platformer example game in `examples/platformer.c`.
 - Verified in Mesen 2.2.1.
 

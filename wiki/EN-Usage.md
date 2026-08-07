@@ -13,10 +13,11 @@ git clone https://github.com/jeong-jimin-github/FAMI-C.git
 cd FAMI-C
 ```
 
-## Build The Tetris ROM
+## Build The Example ROMs
 
 ```powershell
 python .\famic.py build .\examples\tetris.c -o .\build\tetris.nes --asm .\build\tetris.asm
+python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm
 ```
 
 Windows users can also run:

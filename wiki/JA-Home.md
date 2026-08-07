@@ -8,6 +8,7 @@ FAMI-C は NES / ファミコン向けの 6502 プログラムを C で書き、
 - [[対応 C モデル|JA-C-Language]]
 - [[コンパイラ構成|JA-Architecture]]
 - [[テトリス例|JA-Tetris]]
+- [[プラットフォーマー例|JA-Platformer]]
 
 ## 主な特徴
 
@@ -15,5 +16,6 @@ FAMI-C は NES / ファミコン向けの 6502 プログラムを C で書き、
 - NES に合わせた 8 ビット ABI と静的メモリモデルを使います。
 - `wait_vblank`, `ppu_put`, `read_pad`, `rand8` などの基本ランタイムを提供します。
 - `examples/tetris.c` にテトリス風のサンプルゲームがあります。
+- `examples/platformer.c` にメタタイル方式のプラットフォーマーがあります。
 - Mesen 2.2.1 で実機に近い動作確認を行っています。
 

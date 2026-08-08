@@ -148,6 +148,7 @@ NROM-256 (iNES mapper 0) — PRG 32KB, CHR 8KB, 세로 미러링, NTSC.
 `web-emulator/`는 [JSNES](https://github.com/bfirsh/jsnes)를 벤더링한 것으로
 각자의 라이선스를 따릅니다 (`web-emulator/LICENSE`).
 
-로고(`docs/logo.svg`)의 글자는 [Black Han Sans](https://fonts.google.com/specimen/Black+Han+Sans)와
-[Archivo Black](https://fonts.google.com/specimen/Archivo+Black)의 글리프를 아웃라인으로
-변환해 만들었습니다 (SIL Open Font License 1.1).
+로고(`docs/logo.svg`)의 「화미-씨」는 원본 그림에서 그대로 벡터로 따냈습니다.
+「FAMI-C」와 부제만 [Archivo Black](https://fonts.google.com/specimen/Archivo+Black),
+[Black Han Sans](https://fonts.google.com/specimen/Black+Han+Sans)의 글리프를
+아웃라인으로 변환해 썼습니다 (SIL Open Font License 1.1).

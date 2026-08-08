@@ -1,244 +1,94 @@
 # FAMI-C
 
-FAMI-C is a self-contained C compiler and ROM builder for the NES/Famicom
-6502. It parses a practical 8-bit C subset, emits 6502 assembly, assembles it,
-adds a small NES runtime, and writes a mapper-0 iNES ROM.
+**LLM 에이전트를 위한 패미컴(NES) C 컴파일러.**
 
-The repository includes two complete NES games. `examples/tetris.c` is a
-Tetris-style game with a polished multi-palette interface, beveled blocks, and
-a four-channel 2A03 chiptune arrangement. `examples/platformer.c` is a
-four-stage metatile platformer with jumping, patrols, collectibles, spike pits
-and sound effects.
+C 소스 한 장을 받아 6502 어셈블리를 만들고, 어셈블한 뒤, NES 런타임을 붙여
+mapper 0 iNES ROM을 낸다. 파이썬 표준 라이브러리 말고는 아무것도 필요 없다.
 
-## Documentation
+이 프로젝트의 설계 기준은 사람의 편의가 아니라 **에이전트가 사람 없이 게임을
+만들고, 스스로 검증하고, 스스로 고칠 수 있는가**다.
 
-- Play the examples in a browser: <https://jeong-jimin-github.github.io/FAMI-C/#play>
-- GitHub Pages: <https://jeong-jimin-github.github.io/FAMI-C/>
-- Wiki home: <https://github.com/jeong-jimin-github/FAMI-C/wiki>
-- 한국어 Wiki: <https://github.com/jeong-jimin-github/FAMI-C/wiki/KO-Home>
-- 日本語 Wiki: <https://github.com/jeong-jimin-github/FAMI-C/wiki/JA-Home>
-- English Wiki: <https://github.com/jeong-jimin-github/FAMI-C/wiki/EN-Home>
+## 에이전트라면
 
-## Quick Start
+**[`AGENTS.md`](AGENTS.md)를 읽어라.** 그 파일 하나로 게임 하나를 완성할 수 있다.
 
-```powershell
-python .\famic.py build .\examples\tetris.c -o .\build\tetris.nes --asm .\build\tetris.asm
+## 사람이라면
+
+```bash
+python famic.py build examples/platformer.c -o build/platformer.nes
+python famic.py screen build/platformer.nes --frames 30
+python famic.py run build/platformer.nes --frames 200 \
+    --input "10:START, 40:RIGHT*60" --sym "_g_hero__x,_g_score:16"
 ```
 
-The output ROM is `build/tetris.nes`.
+브라우저에서 예제 플레이: <https://jeong-jimin-github.github.io/FAMI-C/#play>
 
-### Controls
+## 무엇이 다른가
 
-On the title screen the D-pad picks the starting level: left/right steps by
-one and up/down steps by five, over levels 0-19. Start begins the game.
-
-While playing:
-
-- D-pad left/right: move (with delayed auto shift)
-- D-pad down: soft drop
-- D-pad up: hard drop
-- A: rotate clockwise
-- B: rotate counter-clockwise
-- Start: pause/resume
-
-Beating one of the three best scores opens a name-entry screen: up/down picks
-a letter, left/right (or A) moves between the three slots, and Start confirms.
-
-The game includes a fair randomized 7-bag, next-piece preview, one- and
-two-column wall kicks, lock delay, a line-clear flash, score, lines, levels,
-increasing gravity, a start-level picker, a best-player table with name entry,
-sound effects layered over the BGM, pause, and game-over states. Its 16-bit
-LFSR advances continuously with controller/input timing, so ordinary play does
-not repeat the same opening sequence on every run.
-
-Every rotation state is a true rotation of the piece about a fixed pivot, so no
-piece changes shape or drifts off its pivot as it spins: T, J and L cycle
-through four orientations, I, S and Z flip between two, and O never changes.
-
-### Music
-
-The embedded BGM covers the MIDI's complete musical section: 4:26.127,
-generated from the locally supplied `slaop88c.mid`. The source file is
-4:29.605 including its initial silence. The arrangement is reduced to the NES
-2A03's two pulse channels, triangle channel, and noise channel; the original
-MIDI is not bundled.
-
-The arrangement can be verified or re-embedded when `mido` is installed:
-
-```powershell
-python .\tools\arrange_midi.py --input "$HOME\Downloads\slaop88c.mid" --embed-c .\examples\tetris.c --check
-```
-
-See `assets/MUSIC.md` for the source hash, arrangement details, and usage
-notice from the MIDI's embedded metadata.
-
-## Platformer Example
-
-```powershell
-python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm
-```
-
-The stage is a grid of 16x16 cells drawn as background metatiles: 16 across
-and 15 down, with cell row 0 as the status bar. One cell is at once the unit of
-level storage - 240 bytes, inside the 8-bit array index the code generator
-emits - and one attribute quadrant, so every cell picks its own background
-palette.
-
-The hero and the patrols are hardware sprites and move in pixels, not in
-cells. Positions are 12.4 fixed point: a pixel byte plus a sixteenth-of-a-pixel
-accumulator, so a speed like 1.25 px per frame is exact and the motion is
-smooth. Vertical motion is a real velocity with gravity, which is what gives
-the jump its arc - and holding A longer jumps higher, because releasing it
-part way up trims the rise.
-
-### Controls
-
-- D-pad left/right: walk
-- B (held): run
-- A: jump; releasing A during the rise cuts the jump short
-
-### Gameplay
-
-Four stages of gems, patrols, spike pits, bottomless gaps and an exit door.
-Landing on a patrol while falling squashes it and bounces the hero; touching
-one any other way, or entering spikes, or falling out of the stage, costs one
-of three lives. Gems score 100, a squashed patrol 200, and clearing a stage
-1000. Sound effects cover jumping, landing, gems, stomps, damage, stage clears
-and game over.
-
-The hero walks at 1.25 px per frame, runs at 2, and a full jump rises about
-54 pixels; its hitbox is inset from the 16x16 sprite so a one-cell gap is
-comfortable rather than pixel-perfect. Because the actors are sprites, the
-background is only redrawn for a collected gem and the HUD, through a queue
-flushed at most six tiles per vblank - the NMI spends 513 cycles on the OAM
-transfer first.
-
-To run a compiler smoke test:
-
-```powershell
-python .\famic.py check .\tests\smoke.c
-```
-
-To run all automated checks:
-
-```powershell
-python -m unittest discover -s tests
-```
-
-To run the gameplay and music smoke test in Mesen 2.2.1:
-
-```powershell
-python .\tools\run_mesen_smoke.py
-```
-
-## Browser Demo
-
-The GitHub Pages site runs both example ROMs in the browser on
-[JSNES](https://github.com/bfirsh/jsnes), the JavaScript NES emulator vendored
-in `web-emulator/`. It also opens a `.nes` file you built yourself, which never
-leaves your machine. Keyboard, gamepad, and an on-screen pad on touch devices
-all drive controller 1.
-
-Pages serves `docs/` as it stands, so the ROMs and the emulator have to be
-committed inside it. Regenerate them whenever an example or the emulator
-changes:
-
-```powershell
-python .\tools\build_pages.py
-```
-
-That writes `docs/roms/*.nes` from `examples/*.c` and copies the JSNES sources
-into `docs/vendor/jsnes/`. The page loads them as plain ES modules, so there is
-no bundler and no install step. `--check` reports drift instead of writing, and
-`tests/test_pages.py` runs the same check, so a stale ROM fails the test suite
-rather than reaching the site.
-
-## Supported C Model
-
-The NES backend supports:
-
-- `char`, `unsigned char`, `int`, `unsigned int`, and `void` syntax
-- 8-bit arithmetic and comparisons
-- global/static scalar and array storage
-- `const unsigned char` ROM tables
-- functions with fixed static parameter slots
-- `if`, `else`, `while`, `for`, `break`, `continue`, and `return`
-- array indexing, calls, unary operators, binary operators, and assignment
-- simple object-like `#define` constants
-
-Current target constraints:
-
-- Arithmetic is 8-bit, matching the runtime ABI.
-- Locals are statically allocated; recursion is not supported.
-- Pointers, structs, unions, casts, varargs, and the C standard library are not
-  implemented.
-- Generated ROMs are NROM-256/iNES mapper 0 with a 32K PRG image and one 8K
-  CHR bank.
-
-## NES Runtime API
-
-C programs can declare and call these native helpers:
+| | 보통의 NES 툴체인 | FAMI-C |
+|---|---|---|
+| 그래픽 | 별도 타일 편집기 + 수동 인덱스 관리 | `asset tile`로 소스 안에 선언, 인덱스는 컴파일러가 배정 |
+| 기능 켜기 | 헤더 선언 / 링커 설정 / 빌드 플래그 | **호출하면 켜진다** |
+| 에러 | 어셈블러 메시지, 행 번호 없음 | 안정적 코드 + 행·열 + 고치는 방법, `--json` 지원 |
+| 검증 | GUI 에뮬레이터에서 사람이 본다 | 내장 헤드리스 NES. 입력 스크립트, **심볼 이름으로 RAM 조회**, 화면 텍스트 덤프 |
+| 어셈블리 | 직접 쓴다 | OAM 전송·VRAM 타이밍·스크롤·사운드 전부 런타임이 처리 |
 
 ```c
-extern void wait_vblank(void);
-extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
-extern unsigned char read_pad(void);
-extern unsigned char rand8(void);
+#include <fami.h>
+
+asset tile T_BALL = {
+    "..3333.."  ".333333."  "33322333"  "33222233"
+    "33222233"  "33322333"  ".333333."  "..3333.."
+};
+
+void main(void) {
+    pal_load(PAL);
+    while (1) {
+        pad_poll();
+        if (pad_held(0) & PAD_RIGHT) x = x + 1;
+        spr_clear();
+        spr(x, y, T_BALL, SPR_PAL0);
+        wait_vblank();
+    }
+}
 ```
 
-Declaring `oam_reset` and `oam_sprite` together turns on the sprite runtime.
-It reserves a page-aligned shadow OAM at `$0200`, copies it out with `$4014`
-from the NMI, and enables sprites in `$2001`:
+## 문서
 
-```c
-extern void oam_reset(void);
-extern void oam_sprite(unsigned char x, unsigned char y, unsigned char tile,
-                       unsigned char attr);
+| 문서 | 내용 |
+|------|------|
+| [`AGENTS.md`](AGENTS.md) | 에이전트 진입점. 여기부터 |
+| [`docs/agent/LANGUAGE.md`](docs/agent/LANGUAGE.md) | 지원하는 C 문법, 타입, 메모리 배치 |
+| [`docs/agent/API.md`](docs/agent/API.md) | 런타임 API 전체 (생성물) |
+| [`docs/agent/ASSETS.md`](docs/agent/ASSETS.md) | `asset` 선언 문법 (생성물) |
+| [`docs/agent/ERRORS.md`](docs/agent/ERRORS.md) | 진단 코드 표 (생성물) |
+| [`docs/agent/VERIFY.md`](docs/agent/VERIFY.md) | 헤드리스 검증 워크플로 |
+| [`docs/agent/HARDWARE.md`](docs/agent/HARDWARE.md) | NES 하드웨어 제약 |
+| [`docs/agent/RECIPES.md`](docs/agent/RECIPES.md) | 게임 유형별 골격 코드 |
+| [`docs/agent/PLAN.md`](docs/agent/PLAN.md) | 왜 이렇게 설계했는가 |
+
+## 예제
+
+- [`examples/platformer.c`](examples/platformer.c) — 스프라이트, 고정소수점 물리,
+  메타타일 스테이지 4개, 순찰병, 보석, 가시, BGM/효과음
+- [`examples/tetris.c`](examples/tetris.c) — 배경 전용. 7-bag, 벽 차기, 락 딜레이,
+  레벨, 줄 지우기 연출, 최고 점수 이름 입력
+
+## 개발
+
+```bash
+python -m unittest discover -s tests -t .   # 단위 테스트 + 예제 게임플레이 시나리오
+python famic.py test tests/specs/*.spec.json # 게임플레이 시나리오만
+python tools/gen_docs.py                     # 생성 문서와 include/fami.h 갱신
+python tools/gen_docs.py --check             # 생성물이 코드와 어긋났는지 확인
+python tools/build_pages.py                  # docs/ 의 예제 ROM 갱신
 ```
 
-`oam_reset()` parks all 64 hardware sprites below the visible area and rewinds
-the write cursor; each `oam_sprite()` appends one 8x8 sprite at pixel `(x, y)`,
-where `attr` is the usual OAM byte - palette in bits 0-1, priority in bit 5,
-and flips in bits 6-7. Refill the whole list every frame; the transfer happens
-in the next vblank, so the C side never has to time it. Up to 63 sprites are
-kept, and the PPU still draws at most 8 on any one scanline.
+## 대상
 
-Declaring `sfx_play` alongside five const tables enables the runtime's
-sound-effect player, which borrows pulse 2 from the music driver for the
-duration of an effect and releases it afterwards:
+NROM-256 (iNES mapper 0): PRG 32KB, CHR 8KB, 세로 미러링, NTSC.
 
-```c
-extern void sfx_play(unsigned char effect);
+## 라이선스
 
-const unsigned char SFX_START[16];      /* first frame of each effect */
-const unsigned char SFX_LENGTH[16];     /* frame count, 0 for an unused slot */
-const unsigned char SFX_CTRL[N];        /* $4004 duty/volume per frame */
-const unsigned char SFX_TIMER_LO[N];    /* $4006 per frame */
-const unsigned char SFX_TIMER_HI[N];    /* low three bits reach $4007 */
-```
-
-`read_pad()` returns the common NES serial controller order packed as:
-
-- A: `128`
-- B: `64`
-- Select: `32`
-- Start: `16`
-- Up: `8`
-- Down: `4`
-- Left: `2`
-- Right: `1`
-
-## Files
-
-- `famic.py` - compiler, 6502 assembler, runtime, and iNES packager
-- `examples/tetris.c` - example NES/Famicom Tetris-style game
-- `examples/platformer.c` - example NES/Famicom platformer
-- `tests/smoke.c` - tiny compiler smoke test
-- `tests/test_toolchain.py` - automated ROM/header/vector tests
-- `tests/test_platformer.py` - platformer stage, tile and physics tests
-- `tests/test_pages.py` - checks the published site and its generated assets
-- `build.ps1` - convenience build command for the Tetris ROM
-- `tools/build_pages.py` - regenerates the ROMs and emulator the site serves
-- `docs/` - GitHub Pages site, including the in-browser emulator
-- `web-emulator/` - JSNES sources the site is built from
-- `wiki/` - source Markdown for the GitHub Wiki pages
+`web-emulator/`는 [JSNES](https://github.com/bfirsh/jsnes)를 벤더링한 것으로
+각자의 라이선스를 따른다 (`web-emulator/LICENSE`).

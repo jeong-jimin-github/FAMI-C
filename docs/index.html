@@ -150,20 +150,21 @@
             <ul>
               <li>Python 3.10 or newer</li>
               <li>Windows PowerShell, macOS shell, or Linux shell</li>
-              <li>NES emulator such as Mesen 2.2.1</li>
+              <li>Nothing else - the headless NES used for testing ships with the compiler</li>
             </ul>
           </article>
           <article>
             <h3>Build An Example</h3>
-            <pre><code>python .\famic.py build .\examples\tetris.c -o .\build\tetris.nes --asm .\build\tetris.asm
-python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm</code></pre>
-            <p>Windows users can also run:</p>
-            <pre><code>.\build.ps1</code></pre>
+            <pre><code>python famic.py build examples/tetris.c -o build/tetris.nes
+python famic.py build examples/platformer.c -o build/platformer.nes</code></pre>
+            <p>Check it without an emulator:</p>
+            <pre><code>python famic.py screen build/tetris.nes --frames 30
+python famic.py run build/tetris.nes --frames 300 --sym "_g_score:16"</code></pre>
           </article>
           <article>
             <h3>Run Tests</h3>
-            <pre><code>python -m unittest discover -s tests</code></pre>
-            <p>The tests verify compilation, PRG size, iNES header fields, reset vectors, and RAM placement.</p>
+            <pre><code>python -m unittest discover -s tests -t .</code></pre>
+            <p>The suite compiles programs, runs them on the bundled headless NES, and reads the results back out of RAM by symbol name.</p>
           </article>
         </div>
       </div>
@@ -173,8 +174,8 @@ python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm 
       <h2>Compiler Architecture</h2>
       <div class="pipeline">
         <div><strong>C source</strong><span>Lexer and parser</span></div>
-        <div><strong>AST</strong><span>8-bit NES-oriented semantic model</span></div>
-        <div><strong>6502 assembly</strong><span>Static locals, native runtime calls</span></div>
+        <div><strong>AST</strong><span>Typed 8/16-bit model, asset declarations</span></div>
+        <div><strong>6502 assembly</strong><span>Static locals, runtime library calls</span></div>
         <div><strong>PRG ROM</strong><span>Built-in 6502 assembler</span></div>
         <div><strong>iNES ROM</strong><span>NROM-256 mapper 0 package</span></div>
       </div>
@@ -191,30 +192,32 @@ python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm 
           <article>
             <h3>Supported</h3>
             <ul>
-              <li><code>char</code>, <code>unsigned char</code>, <code>int</code>, <code>unsigned int</code>, <code>void</code></li>
-              <li>8-bit arithmetic, comparison, logical operators, arrays, and function calls</li>
-              <li><code>if</code>, <code>else</code>, <code>while</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>return</code></li>
-              <li>Global RAM variables and <code>const unsigned char</code> ROM tables</li>
+              <li><code>u8</code>, <code>i8</code>, <code>u16</code>, <code>i16</code>, <code>void</code> - real 16-bit arithmetic with C promotion rules</li>
+              <li><code>struct</code> (lowered to parallel arrays), <code>enum</code>, <code>typedef</code>, multi-dimensional and local arrays</li>
+              <li><code>if</code>, <code>else</code>, <code>while</code>, <code>do</code>, <code>for</code>, <code>switch</code>, <code>break</code>, <code>continue</code>, <code>return</code></li>
+              <li>String literals, function-like macros, <code>#include</code>, <code>#if</code></li>
+              <li><code>const</code> ROM tables, and <code>asset</code> declarations for tiles, palettes, maps and sound</li>
             </ul>
           </article>
           <article>
             <h3>NES Runtime API</h3>
-            <pre><code>extern void wait_vblank(void);
-extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
-extern unsigned char read_pad(void);
-extern unsigned char rand8(void);
-extern void sfx_play(unsigned char effect);
-extern void oam_reset(void);
-extern void oam_sprite(unsigned char x, unsigned char y,
-                       unsigned char tile, unsigned char attr);</code></pre>
+            <p>Built in. Nothing to declare - calling a function is what pulls its 6502 routine into the ROM.</p>
+            <pre><code>wait_vblank();  frame_count();  ppu_on();  ppu_off();
+pad_poll();  pad_held(0);  pad_pressed(0);  pad_released(0);
+bg_tile();  bg_rect();  bg_text();  bg_char();  bg_number();
+bg_attr();  bg_meta();  bg_map();  bg_clear();
+spr_clear();  spr();  spr_meta();  spr_meta_flip();
+scroll_set();  pal_load();  pal_set();  pal_bright();
+mul8();  div8();  mod8();  abs8();  rand();  rand_range();
+box_hit();  sfx_play();  music_play();  music_stop();</code></pre>
           </article>
           <article>
             <h3>Current Limits</h3>
             <ul>
-              <li>Arithmetic ABI is 8-bit.</li>
               <li>Locals are statically allocated; recursion is not supported.</li>
-              <li>Pointers, structs, casts, varargs, and libc are not implemented.</li>
-              <li>Generated ROMs target mapper 0 / NROM-256.</li>
+              <li>No pointers, varargs, floating point, or libc.</li>
+              <li>Signed division is limited to powers of two.</li>
+              <li>Generated ROMs target mapper 0 / NROM-256: 32 KB PRG, 256 tiles, 1280 bytes of RAM.</li>
             </ul>
           </article>
         </div>
@@ -226,9 +229,8 @@ extern void oam_sprite(unsigned char x, unsigned char y,
       <p>
         The example in <code>examples/tetris.c</code> demonstrates static arrays, ROM lookup tables,
         controller polling, collision checks, line clearing, and vblank-safe PPU updates. Its
-        presentation uses multiple palettes, beveled blocks, directional borders, framed HUD
-        panels, a large title logo, a start-level picker, and a best-player table with
-        name entry.
+        presentation uses per-level palettes, seven distinct block patterns, a framed well,
+        a next-piece preview, a start-level picker, and a best-player table with name entry.
       </p>
       <div class="columns">
         <article>
@@ -310,8 +312,8 @@ extern void oam_sprite(unsigned char x, unsigned char y,
       </p>
       <ol>
         <li>소스 파일을 <code>examples</code> 또는 별도 폴더에 작성합니다.</li>
-        <li><code>extern</code> 런타임 함수를 선언하고, <code>main(void)</code>을 구현합니다.</li>
-        <li><code>python .\famic.py build source.c -o build/game.nes --asm build/game.asm</code>으로 빌드합니다.</li>
+        <li><code>#include &lt;fami.h&gt;</code> 후 <code>main(void)</code>을 구현합니다.</li>
+        <li><code>python famic.py build source.c -o build/game.nes</code>으로 빌드합니다.</li>
         <li>Mesen 같은 에뮬레이터에서 <code>.nes</code> 파일을 엽니다.</li>
       </ol>
       <p>
@@ -320,8 +322,9 @@ extern void oam_sprite(unsigned char x, unsigned char y,
         열어서 확인할 수 있으며, 파일은 브라우저 밖으로 전송되지 않습니다.
       </p>
       <p>
-        자세한 한국어 Wiki는
-        <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/KO-Home">KO-Home</a>에서 볼 수 있습니다.
+        전체 문서는 <a href="https://github.com/jeong-jimin-github/FAMI-C/blob/master/AGENTS.md">AGENTS.md</a>에 있습니다.
+        언어 레퍼런스는 <a href="https://github.com/jeong-jimin-github/FAMI-C/blob/master/docs/agent/LANGUAGE.md">LANGUAGE.md</a>,
+        런타임 API는 <a href="https://github.com/jeong-jimin-github/FAMI-C/blob/master/docs/agent/API.md">API.md</a>를 보세요.
       </p>
     </section>
 
@@ -335,8 +338,8 @@ extern void oam_sprite(unsigned char x, unsigned char y,
       </p>
       <ol>
         <li>C ソースに <code>main(void)</code> を実装します。</li>
-        <li>必要なランタイム関数を <code>extern</code> 宣言します。</li>
-        <li><code>python .\famic.py build source.c -o build/game.nes --asm build/game.asm</code> を実行します。</li>
+        <li><code>#include &lt;fami.h&gt;</code> してランタイム関数を呼ぶだけです。</li>
+        <li><code>python famic.py build source.c -o build/game.nes</code> を実行します。</li>
         <li>Mesen などのエミュレーターで生成された ROM を開きます。</li>
       </ol>
       <p>
@@ -345,8 +348,7 @@ extern void oam_sprite(unsigned char x, unsigned char y,
         開けます。ファイルはブラウザーの外に送信されません。
       </p>
       <p>
-        日本語 Wiki は
-        <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/JA-Home">JA-Home</a> にあります。
+        ドキュメントは <a href="https://github.com/jeong-jimin-github/FAMI-C/blob/master/AGENTS.md">AGENTS.md</a> にあります（韓国語）。
       </p>
     </section>
 
@@ -359,8 +361,8 @@ extern void oam_sprite(unsigned char x, unsigned char y,
       </p>
       <ol>
         <li>Write a C source file with <code>main(void)</code>.</li>
-        <li>Declare the native runtime functions your program uses.</li>
-        <li>Run <code>python .\famic.py build source.c -o build/game.nes --asm build/game.asm</code>.</li>
+        <li><code>#include &lt;fami.h&gt;</code> and just call the runtime functions.</li>
+        <li>Run <code>python famic.py build source.c -o build/game.nes</code>.</li>
         <li>Open the generated ROM in Mesen or another NES emulator.</li>
       </ol>
       <p>
@@ -369,15 +371,14 @@ extern void oam_sprite(unsigned char x, unsigned char y,
         yourself, without sending it anywhere.
       </p>
       <p>
-        The English Wiki starts at
-        <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/EN-Home">EN-Home</a>.
+        The full documentation lives in <a href="https://github.com/jeong-jimin-github/FAMI-C/blob/master/AGENTS.md">AGENTS.md</a> (Korean).
       </p>
     </section>
   </main>
 
   <footer>
     <p>FAMI-C - C compiler, 6502 assembler, NES runtime, and iNES ROM builder.</p>
-    <p><a href="https://github.com/jeong-jimin-github/FAMI-C">Repository</a> · <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki">Wiki</a></p>
+    <p><a href="https://github.com/jeong-jimin-github/FAMI-C">Repository</a> · <a href="https://github.com/jeong-jimin-github/FAMI-C/blob/master/AGENTS.md">Documentation</a></p>
     <p class="fineprint">
       In-browser emulation by <a href="https://github.com/bfirsh/jsnes">JSNES</a>, used under the
       Apache License 2.0. See <a href="vendor/jsnes/LICENSE">vendor/jsnes/LICENSE</a>.

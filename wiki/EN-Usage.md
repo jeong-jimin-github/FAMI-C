@@ -26,6 +26,23 @@ Windows users can also run:
 .\build.ps1
 ```
 
+## Play In The Browser
+
+The [GitHub Pages site](https://jeong-jimin-github.github.io/FAMI-C/#play) runs
+both example ROMs with [JSNES](https://github.com/bfirsh/jsnes), so you can try
+them before installing anything. It also opens a `.nes` file you built
+yourself; the file stays in your browser.
+
+Arrow keys are the D-pad, `X` is A, `Z` is B, `Enter` is Start and right `Ctrl`
+is Select. Keys reach the game only while the screen has focus. Gamepads work,
+and touch devices get an on-screen pad.
+
+After changing an example or the emulator, regenerate what the site serves:
+
+```powershell
+python .\tools\build_pages.py
+```
+
 ## Test
 
 ```powershell

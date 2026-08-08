@@ -26,6 +26,23 @@ Windows では次のスクリプトも使えます。
 .\build.ps1
 ```
 
+## ブラウザーで実行
+
+[GitHub Pages のサイト](https://jeong-jimin-github.github.io/FAMI-C/#play)では
+[JSNES](https://github.com/bfirsh/jsnes)で 2 つのサンプル ROM をそのまま実行でき、
+インストールせずに動作を確認できます。自分でビルドした `.nes` も開けます。
+ファイルはブラウザーの外に出ません。
+
+方向キーが十字キー、`X` が A、`Z` が B、`Enter` が Start、右 `Ctrl` が Select です。
+キー入力は画面にフォーカスがあるときだけゲームに届きます。ゲームパッドも使え、
+タッチ端末では画面上のパッドが表示されます。
+
+サンプルやエミュレーターを変更したら、サイトが配信するファイルを再生成します。
+
+```powershell
+python .\tools\build_pages.py
+```
+
 ## テスト
 
 ```powershell

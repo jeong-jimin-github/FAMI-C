@@ -18,6 +18,7 @@ FAMI-C는 NES 및 패미컴용 6502 프로그램을 C로 작성하고 `.nes` ROM
 - 예제 테트리스 게임을 `examples/tetris.c`에서 제공합니다.
 - 예제 플랫포머 게임을 `examples/platformer.c`에서 제공합니다.
 - Mesen 2.2.1에서 실제 구동 검증했습니다.
+- 두 예제는 [Pages 사이트](https://jeong-jimin-github.github.io/FAMI-C/#play)의 브라우저 에뮬레이터에서 바로 실행할 수 있습니다.
 
 ## 빠른 시작
 

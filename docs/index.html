@@ -12,6 +12,7 @@
     <nav class="topbar" aria-label="Primary navigation">
       <a class="brand" href="#top">FAMI-C</a>
       <div class="navlinks">
+        <a href="#play">Play</a>
         <a href="#ko">한국어</a>
         <a href="#ja">日本語</a>
         <a href="#en">English</a>
@@ -27,7 +28,8 @@
           자체 컴파일러, 어셈블러, 런타임, iNES 패키저로 ROM까지 빌드합니다.
         </p>
         <div class="actions">
-          <a class="button primary" href="#quickstart">Quick Start</a>
+          <a class="button primary" href="#play">Play In Browser</a>
+          <a class="button" href="#quickstart">Quick Start</a>
           <a class="button" href="#architecture">Architecture</a>
         </div>
       </section>
@@ -42,6 +44,103 @@
   </header>
 
   <main>
+    <section class="wrap" id="play">
+      <p class="eyebrow">Playable Demo</p>
+      <h2>Play The Examples In Your Browser</h2>
+      <p class="lead">
+        Both example ROMs are compiled by FAMI-C and run here on
+        <a href="https://github.com/bfirsh/jsnes">JSNES</a>, a JavaScript NES emulator.
+        The ROMs, the emulator, and this page are all served from this site - nothing is
+        uploaded and nothing is installed.
+      </p>
+
+      <p class="fallback" data-role="fallback">
+        This demo needs a browser with JavaScript modules enabled. Without one, build the
+        ROMs locally with <code>python .\famic.py build .\examples\tetris.c -o .\build\tetris.nes</code>
+        and open them in Mesen.
+      </p>
+
+      <div class="emulator" data-emulator hidden>
+        <div class="emulator-main">
+          <div class="emulator-stage" data-role="stage" tabindex="0" aria-label="NES screen">
+            <div class="emulator-overlay" data-role="overlay">
+              <p>Pick an example. Sound starts with your first click.</p>
+              <div class="actions">
+                <button class="button primary" type="button" data-rom="roms/tetris.nes" data-label="Tetris">Play Tetris</button>
+                <button class="button" type="button" data-rom="roms/platformer.nes" data-label="Platformer">Play Platformer</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="emulator-bar">
+            <div class="emulator-group" role="group" aria-label="Example ROMs">
+              <button class="button" type="button" data-rom="roms/tetris.nes" data-label="Tetris" aria-pressed="false">Tetris</button>
+              <button class="button" type="button" data-rom="roms/platformer.nes" data-label="Platformer" aria-pressed="false">Platformer</button>
+            </div>
+            <div class="emulator-group">
+              <button class="button" type="button" data-action="pause" disabled>Pause</button>
+              <button class="button" type="button" data-action="reset" disabled>Reset</button>
+              <button class="button" type="button" data-action="fullscreen">Fullscreen</button>
+              <label class="emulator-volume">Volume
+                <input type="range" min="0" max="100" value="70" step="5" data-role="volume" aria-label="Volume">
+              </label>
+              <label class="button emulator-file">Open a .nes file
+                <input type="file" accept=".nes,application/octet-stream" data-role="file">
+              </label>
+            </div>
+          </div>
+
+          <p class="emulator-status" data-role="status" role="status">Ready.</p>
+
+          <div class="emulator-pad">
+            <div class="pad-dpad">
+              <button class="pad-key up" type="button" data-button="up" aria-label="Up">&#9650;</button>
+              <button class="pad-key left" type="button" data-button="left" aria-label="Left">&#9664;</button>
+              <button class="pad-key right" type="button" data-button="right" aria-label="Right">&#9654;</button>
+              <button class="pad-key down" type="button" data-button="down" aria-label="Down">&#9660;</button>
+            </div>
+            <div class="pad-face">
+              <button class="pad-key small" type="button" data-button="select">SELECT</button>
+              <button class="pad-key small" type="button" data-button="start">START</button>
+              <button class="pad-key round" type="button" data-button="b">B</button>
+              <button class="pad-key round" type="button" data-button="a">A</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="emulator-side">
+          <article>
+            <h3>Keyboard</h3>
+            <ul class="keymap">
+              <li><span>D-pad</span><code>Arrow keys</code></li>
+              <li><span>A</span><code>X</code></li>
+              <li><span>B</span><code>Z</code></li>
+              <li><span>Start</span><code>Enter</code></li>
+              <li><span>Select</span><code>Right Ctrl</code></li>
+              <li><span>Turbo A / B</span><code>S / A</code></li>
+            </ul>
+            <p>
+              Keys reach the game only while the screen has focus, so click the screen once
+              if nothing responds - and everywhere else on the page the arrow keys still
+              scroll as usual. A connected gamepad works too, and touch devices get an
+              on-screen pad under the screen.
+            </p>
+          </article>
+          <article>
+            <h3>What To Try</h3>
+            <ul>
+              <li><strong>Tetris</strong>: pick a start level on the title screen, then Enter to begin.</li>
+              <li><strong>Platformer</strong>: Enter to start, Z to run, X to jump.</li>
+              <li>
+                <strong>Your own ROM</strong>: build one with FAMI-C and open it with
+                <em>Open a .nes file</em>. It stays in your browser.
+              </li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
     <section class="band" id="quickstart">
       <div class="wrap">
         <h2>Quick Start</h2>
@@ -207,6 +306,11 @@ extern void sfx_play(unsigned char effect);</code></pre>
         <li>Mesen 같은 에뮬레이터에서 <code>.nes</code> 파일을 엽니다.</li>
       </ol>
       <p>
+        빌드 없이 결과만 보고 싶다면 <a href="#play">브라우저 에뮬레이터</a>에서
+        두 예제 ROM을 바로 실행할 수 있습니다. 직접 빌드한 <code>.nes</code> 파일도
+        열어서 확인할 수 있으며, 파일은 브라우저 밖으로 전송되지 않습니다.
+      </p>
+      <p>
         자세한 한국어 Wiki는
         <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/KO-Home">KO-Home</a>에서 볼 수 있습니다.
       </p>
@@ -227,6 +331,11 @@ extern void sfx_play(unsigned char effect);</code></pre>
         <li>Mesen などのエミュレーターで生成された ROM を開きます。</li>
       </ol>
       <p>
+        ビルドせずに動きを見たい場合は、<a href="#play">ブラウザーエミュレーター</a>で
+        2 つのサンプル ROM をそのまま実行できます。自分でビルドした <code>.nes</code> も
+        開けます。ファイルはブラウザーの外に送信されません。
+      </p>
+      <p>
         日本語 Wiki は
         <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/JA-Home">JA-Home</a> にあります。
       </p>
@@ -246,6 +355,11 @@ extern void sfx_play(unsigned char effect);</code></pre>
         <li>Open the generated ROM in Mesen or another NES emulator.</li>
       </ol>
       <p>
+        To see the output before installing anything, run both example ROMs in the
+        <a href="#play">browser emulator</a>. It also opens a <code>.nes</code> file you built
+        yourself, without sending it anywhere.
+      </p>
+      <p>
         The English Wiki starts at
         <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki/EN-Home">EN-Home</a>.
       </p>
@@ -255,6 +369,11 @@ extern void sfx_play(unsigned char effect);</code></pre>
   <footer>
     <p>FAMI-C - C compiler, 6502 assembler, NES runtime, and iNES ROM builder.</p>
     <p><a href="https://github.com/jeong-jimin-github/FAMI-C">Repository</a> · <a href="https://github.com/jeong-jimin-github/FAMI-C/wiki">Wiki</a></p>
+    <p class="fineprint">
+      In-browser emulation by <a href="https://github.com/bfirsh/jsnes">JSNES</a>, used under the
+      Apache License 2.0. See <a href="vendor/jsnes/LICENSE">vendor/jsnes/LICENSE</a>.
+    </p>
   </footer>
+  <script type="module" src="emulator.js"></script>
 </body>
 </html>

@@ -30,6 +30,22 @@ extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
 extern unsigned char read_pad(void);
 extern unsigned char rand8(void);
 ```
+
+Declaring `oam_reset` and `oam_sprite` together turns on the sprite runtime:
+a page-aligned shadow OAM at `$0200`, an `$4014` transfer from the NMI, and
+sprites enabled in `$2001`.
+
+```c
+extern void oam_reset(void);
+extern void oam_sprite(unsigned char x, unsigned char y, unsigned char tile,
+                       unsigned char attr);
+```
+
+`oam_reset()` parks all 64 sprites below the visible area and rewinds the
+write cursor; each `oam_sprite()` appends one 8x8 sprite, where `attr` is the
+usual OAM byte. Refill the list every frame - up to 63 sprites are kept, and
+the PPU still draws at most 8 on a scanline.
+
 ### Sound effects
 
 `sfx_play(id)` is available when the program declares it and supplies the five

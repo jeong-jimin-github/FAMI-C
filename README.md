@@ -78,13 +78,18 @@ notice from the MIDI's embedded metadata.
 python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm
 ```
 
-The FAMI-C runtime draws backgrounds only, so the platformer is built on a
-16x16 metatile grid rather than on sprites: the screen is 16 cells wide and 15
-cells tall, cell row 0 is the status bar, and one cell is at once the unit of
-collision, of level storage, and of the attribute table. Cells therefore pick
-their own background palette, while the hero and the patrols are drawn in
-colour 3 only - which is white in all four palettes - so they stay readable
-wherever they walk.
+The stage is a grid of 16x16 cells drawn as background metatiles: 16 across
+and 15 down, with cell row 0 as the status bar. One cell is at once the unit of
+level storage - 240 bytes, inside the 8-bit array index the code generator
+emits - and one attribute quadrant, so every cell picks its own background
+palette.
+
+The hero and the patrols are hardware sprites and move in pixels, not in
+cells. Positions are 12.4 fixed point: a pixel byte plus a sixteenth-of-a-pixel
+accumulator, so a speed like 1.25 px per frame is exact and the motion is
+smooth. Vertical motion is a real velocity with gravity, which is what gives
+the jump its arc - and holding A longer jumps higher, because releasing it
+part way up trims the rise.
 
 ### Controls
 
@@ -101,11 +106,12 @@ of three lives. Gems score 100, a squashed patrol 200, and clearing a stage
 1000. Sound effects cover jumping, landing, gems, stomps, damage, stage clears
 and game over.
 
-Motion is frame-timed rather than sub-pixel: a walk step takes twelve frames,
-a jump rises three cells over sixteen, and the delay tables at the top of
-`examples/platformer.c` are the whole physics model. Only cells that actually
-changed are redrawn, through a queue that is flushed at most eight tiles per
-vblank so the PPU is never written to late.
+The hero walks at 1.25 px per frame, runs at 2, and a full jump rises about
+54 pixels; its hitbox is inset from the 16x16 sprite so a one-cell gap is
+comfortable rather than pixel-perfect. Because the actors are sprites, the
+background is only redrawn for a collected gem and the HUD, through a queue
+flushed at most six tiles per vblank - the NMI spends 513 cycles on the OAM
+transfer first.
 
 To run a compiler smoke test:
 
@@ -179,6 +185,23 @@ extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
 extern unsigned char read_pad(void);
 extern unsigned char rand8(void);
 ```
+
+Declaring `oam_reset` and `oam_sprite` together turns on the sprite runtime.
+It reserves a page-aligned shadow OAM at `$0200`, copies it out with `$4014`
+from the NMI, and enables sprites in `$2001`:
+
+```c
+extern void oam_reset(void);
+extern void oam_sprite(unsigned char x, unsigned char y, unsigned char tile,
+                       unsigned char attr);
+```
+
+`oam_reset()` parks all 64 hardware sprites below the visible area and rewinds
+the write cursor; each `oam_sprite()` appends one 8x8 sprite at pixel `(x, y)`,
+where `attr` is the usual OAM byte - palette in bits 0-1, priority in bit 5,
+and flips in bits 6-7. Refill the whole list every frame; the transfer happens
+in the next vblank, so the C side never has to time it. Up to 63 sprites are
+kept, and the PPU still draws at most 8 on any one scanline.
 
 Declaring `sfx_play` alongside five const tables enables the runtime's
 sound-effect player, which borrows pulse 2 from the music driver for the

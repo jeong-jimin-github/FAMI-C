@@ -790,6 +790,8 @@ class CodeGenerator:
         self.board_runtime_param = ""
         self.sfx_runtime = False
         self.sfx_runtime_param = ""
+        self.sprite_runtime = False
+        self.sprite_params: List[str] = []
 
     def generate(self) -> str:
         self.index_program()
@@ -942,6 +944,38 @@ class CodeGenerator:
             self.sfx_runtime_param = self.param_label(
                 sfx_runtime_fn.name, sfx_runtime_fn.params[0].name
             )
+        self.sprite_runtime = any(
+            fn.name == "oam_reset"
+            and fn.body is None
+            and fn.is_extern
+            and fn.ret_type.is_extern
+            and fn.ret_type.is_void
+            and not fn.params
+            for fn in self.program.functions
+        )
+        sprite_fn = next(
+            (
+                fn
+                for fn in self.program.functions
+                if fn.name == "oam_sprite"
+                and fn.body is None
+                and fn.is_extern
+                and fn.ret_type.is_extern
+                and fn.ret_type.is_void
+                and len(fn.params) == 4
+            ),
+            None,
+        )
+        if self.sprite_runtime and sprite_fn is None:
+            raise CompileError(
+                "oam_reset needs oam_sprite(x, y, tile, attr) alongside it"
+            )
+        if sprite_fn is not None and not self.sprite_runtime:
+            raise CompileError("oam_sprite needs the sprite runtime; declare oam_reset")
+        if sprite_fn is not None:
+            self.sprite_params = [
+                self.param_label(sprite_fn.name, p.name) for p in sprite_fn.params
+            ]
         for fn in self.program.functions:
             scope: Dict[str, Symbol] = {}
             for p in fn.params:
@@ -997,6 +1031,11 @@ class CodeGenerator:
         return out
 
     def emit_ram(self) -> None:
+        if self.sprite_runtime:
+            # RAM is handed out from $0200 upwards, so claiming the shadow OAM
+            # first parks it on a page boundary - which is what $4014 needs.
+            self.emit(".ram __oam 256")
+            self.emit(".ram __oam_index 1")
         for name in (
             "__tmp0",
             "__tmp1",
@@ -1409,6 +1448,11 @@ class CodeGenerator:
             raise CompileError(f"{expr.name} is not an array")
         return sym.label
 
+    def render_mask(self) -> int:
+        """$2001 while rendering: background, plus sprites when they are used."""
+
+        return 0x1E if self.sprite_runtime else 0x0A
+
     def emit_runtime_start(self) -> None:
         self.emit("_reset:")
         self.emit("SEI")
@@ -1449,11 +1493,13 @@ class CodeGenerator:
             self.emit("STA $4015")
             self.emit("LDA #$30")
             self.emit("STA $4004")
+        if self.sprite_runtime:
+            self.emit("JSR _oam_reset")
         self.emit("JSR _clear_nametable")
         self.emit("JSR _load_palettes")
         self.emit("LDA #$80")
         self.emit("STA $2000")
-        self.emit("LDA #$0A")
+        self.emit(f"LDA #${self.render_mask():02X}")
         self.emit("STA $2001")
         self.emit("JSR _main")
         self.emit("_forever:")
@@ -1471,6 +1517,13 @@ class CodeGenerator:
         self.emit("STA _nmi_flag")
         self.emit("LDA __ppu_rendering")
         self.emit("BEQ __nmi_scroll_done")
+        if self.sprite_runtime:
+            # The shadow OAM the C program filled in last frame is copied out
+            # first, while vblank still has room for the 513-cycle transfer.
+            self.emit("LDA #$00")
+            self.emit("STA $2003")
+            self.emit("LDA #$02")
+            self.emit("STA $4014")
         self.emit("LDA #$00")
         self.emit("STA $2005")
         self.emit("STA $2005")
@@ -1533,7 +1586,7 @@ class CodeGenerator:
         self.emit("_ppu_on:")
         self.emit("LDA #$01")
         self.emit("STA __ppu_rendering")
-        self.emit("LDA #$0A")
+        self.emit(f"LDA #${self.render_mask():02X}")
         self.emit("STA $2001")
         self.emit("RTS")
         self.emit("")
@@ -1605,6 +1658,8 @@ class CodeGenerator:
         self.emit(".byte $0F, $09, $19, $30, $0F, $04, $24, $30")
         self.emit(".byte $0F, $01, $21, $30, $0F, $06, $16, $30")
         self.emit(".byte $0F, $09, $19, $30, $0F, $04, $24, $30")
+        if self.sprite_runtime:
+            self.emit_sprite_runtime()
         if self.music_runtime:
             self.emit_music_runtime()
         if self.sfx_runtime:
@@ -2270,6 +2325,58 @@ class CodeGenerator:
         values = [((timer >> 8) if high else timer) & 0xFF for timer in timers]
         for i in range(0, len(values), 16):
             self.emit(".byte " + ", ".join(f"${value:02X}" for value in values[i : i + 16]))
+
+    def emit_sprite_runtime(self) -> None:
+        """A shadow OAM the C program refills every frame.
+
+        `oam_reset` parks all 64 hardware sprites below the visible area and
+        rewinds the write cursor; `oam_sprite` appends one 8x8 sprite.  The
+        NMI copies the buffer out with $4014, so the C side never has to think
+        about vblank timing for sprites at all.
+        """
+
+        self.emit("")
+        self.emit("_oam_reset:")
+        self.emit("LDX #$00")
+        # $F0 is below the last visible scanline, so a slot left untouched by
+        # this frame simply does not draw.
+        self.emit("LDA #$F0")
+        self.emit("__oam_reset_loop:")
+        self.emit("STA __oam,X")
+        self.emit("INX")
+        self.emit("INX")
+        self.emit("INX")
+        self.emit("INX")
+        self.emit("BNE __oam_reset_loop")
+        self.emit("LDA #$00")
+        self.emit("STA __oam_index")
+        self.emit("RTS")
+        self.emit("")
+        self.emit("_oam_sprite:")
+        self.emit("LDX __oam_index")
+        # The last slot is left as the stop marker, so 63 sprites are usable
+        # and a program that asks for more is ignored instead of wrapping.
+        self.emit("CPX #$FC")
+        self.emit("BCS __oam_sprite_full")
+        # OAM stores the scanline above the sprite, so the requested row is
+        # what the player actually sees.
+        self.emit(f"LDA {self.sprite_params[1]}")
+        self.emit("SEC")
+        self.emit("SBC #$01")
+        self.emit("STA __oam,X")
+        self.emit("INX")
+        self.emit(f"LDA {self.sprite_params[2]}")
+        self.emit("STA __oam,X")
+        self.emit("INX")
+        self.emit(f"LDA {self.sprite_params[3]}")
+        self.emit("STA __oam,X")
+        self.emit("INX")
+        self.emit(f"LDA {self.sprite_params[0]}")
+        self.emit("STA __oam,X")
+        self.emit("INX")
+        self.emit("STX __oam_index")
+        self.emit("__oam_sprite_full:")
+        self.emit("RTS")
 
     def emit_sfx_runtime(self) -> None:
         """Frame-driven sound effects that borrow pulse 2 from the song.
@@ -2982,9 +3089,9 @@ def make_chr() -> bytes:
                 ]
                 put_tile(base + half_row * 2 + half_col, pixels)
 
-    # Platformer actors are drawn in colour 3 only.  Colour 3 is $30 in all
-    # four background palettes, so the hero and the enemies stay the same
-    # bright white wherever the level's attribute map puts them.
+    # Platformer actors are hardware sprites, so they carry their own palette
+    # and can be shaded.  The drawings below are plain silhouettes; bevel()
+    # lights them from the top left the same way the block faces are lit.
     hero_idle = (
         "................",
         ".....333333.....",
@@ -3133,14 +3240,43 @@ def make_chr() -> bytes:
     def mirrored(rows: Sequence[str]) -> Tuple[str, ...]:
         return tuple(row[::-1] for row in rows)
 
-    put_cell(92, hero_idle)
-    put_cell(96, mirrored(hero_idle))
-    put_cell(100, hero_walk)
-    put_cell(104, mirrored(hero_walk))
-    put_cell(108, hero_jump)
-    put_cell(112, mirrored(hero_jump))
-    put_cell(116, enemy_a)
-    put_cell(120, enemy_b)
+    def bevel(rows: Sequence[str]) -> Tuple[str, ...]:
+        """Light a silhouette from the top left: 3 rim, 2 body, 1 shadow."""
+
+        mask = [[bit != "." for bit in row] for row in rows]
+        shaded = []
+        for row in range(16):
+            line = []
+            for col in range(16):
+                if not mask[row][col]:
+                    line.append(".")
+                    continue
+                lit = (
+                    row == 0
+                    or col == 0
+                    or not mask[row - 1][col]
+                    or not mask[row][col - 1]
+                )
+                shadowed = (
+                    row == 15
+                    or col == 15
+                    or not mask[row + 1][col]
+                    or not mask[row][col + 1]
+                )
+                line.append("3" if lit else ("1" if shadowed else "2"))
+            shaded.append("".join(line))
+        return tuple(shaded)
+
+    # Mirroring after shading keeps the two facings exact mirror images, which
+    # is what a hardware flip of the same sprite would have produced.
+    put_cell(92, bevel(hero_idle))
+    put_cell(96, mirrored(bevel(hero_idle)))
+    put_cell(100, bevel(hero_walk))
+    put_cell(104, mirrored(bevel(hero_walk)))
+    put_cell(108, bevel(hero_jump))
+    put_cell(112, mirrored(bevel(hero_jump)))
+    put_cell(116, bevel(enemy_a))
+    put_cell(120, bevel(enemy_b))
     put_cell(124, gem)
     put_cell(128, spikes)
     put_cell(132, door)

@@ -1,21 +1,21 @@
 /* FAMI-C example: a NES/Famicom platformer.
  *
- * The FAMI-C runtime draws backgrounds only - it never enables sprites - so
- * this game is built on a 16x16 metatile grid instead of free pixel motion.
- * The screen is 16 cells wide and 15 cells tall: cell row 0 is the status
- * bar and rows 1..14 are the stage.  Every actor occupies one whole cell,
- * which means one cell is also the unit of collision, of level storage and
- * of the attribute table, so a cell can pick its own background palette.
+ * The stage is a grid of 16x16 cells - 16 across and 15 down, with cell row 0
+ * as the status bar - drawn as background metatiles.  One cell is therefore
+ * at once the unit of level storage (240 bytes, inside the 8-bit array index
+ * the code generator emits) and one attribute quadrant, so every cell picks
+ * its own background palette.
  *
- * The hero and the patrols are drawn in colour 3 only.  Colour 3 is $30 in
- * all four background palettes, so they stay white wherever they walk while
- * the terrain around them changes colour with the attribute map.
+ * The hero and the patrols are hardware sprites, and they move in pixels
+ * rather than in cells.  Positions are 12.4 fixed point: a pixel byte plus a
+ * sixteenth-of-a-pixel accumulator, so a speed like 1.25 px per frame is
+ * exact and the motion is smooth instead of snapping a cell at a time.
+ * Vertical motion is a real velocity with gravity, which is what gives the
+ * jump its arc and makes the jump height depend on how long A is held.
  *
- * Motion is frame-timed rather than sub-pixel: a walk step, a rise step and
- * a fall step each take a whole number of frames, and the tables below are
- * the entire physics model.  Only the cells that actually changed are
- * redrawn, and those writes go through a queue that is flushed at most
- * TILES_PER_VBLANK tiles per vblank so the PPU is never touched late.
+ * Only the background is redrawn through the tile queue - collected gems and
+ * the HUD - and that queue is flushed at most TILES_PER_VBLANK writes per
+ * vblank, after the NMI has spent its 513 cycles copying the shadow OAM out.
  */
 
 extern void wait_vblank(void);
@@ -25,6 +25,9 @@ extern void ppu_on(void);
 extern unsigned char read_pad(void);
 extern unsigned char rand8(void);
 extern void sfx_play(unsigned char effect);
+extern void oam_reset(void);
+extern void oam_sprite(unsigned char x, unsigned char y, unsigned char tile,
+                       unsigned char attr);
 
 #define PAD_A 128
 #define PAD_B 64
@@ -54,6 +57,10 @@ extern void sfx_play(unsigned char effect);
 #define GRASS_TILE 137
 #define BRICK_TILE 138
 
+/* Sprite palettes: 0 is the blue hero set, 1 the red patrol set. */
+#define PAL_HERO 0
+#define PAL_FOE 1
+
 /* Cell kinds stored in the level map. */
 #define C_EMPTY 0
 #define C_DIRT 1
@@ -66,25 +73,50 @@ extern void sfx_play(unsigned char effect);
 
 #define GRID_W 16
 #define GRID_H 15
+#define CELL_PX 16
 #define LEVEL_SIZE 240
 #define STAGE_COUNT 4
 #define MAX_FOES 4
 
-/* Frame budget.  One queued write costs about 200 cycles - the ppu_put call
- * itself plus the loop that feeds it from the queue - so eight of them fit
- * inside an NTSC vblank with room to spare.  Eight is also exactly one
- * erase-and-redraw of a moving actor, which is the common case. */
-#define TILES_PER_VBLANK 8
-#define QUEUE_MAX 40
+/* The rightmost pixel column a 16-wide sprite can start on. */
+#define MAX_X 240
+/* Past this row the hero has left the stage through a gap in the floor. */
+#define PIT_Y 216
 
-/* Physics, in frames per cell. */
-#define WALK_DELAY 12
-#define RUN_DELAY 8
-#define FOE_DELAY 6
+/* Frame budget.  The NMI now spends 513 cycles on the OAM transfer before
+ * the main loop gets vblank back, so the queue keeps a smaller slice. */
+#define TILES_PER_VBLANK 6
+#define QUEUE_MAX 24
 
-#define VS_GROUND 0
-#define VS_JUMP 1
-#define VS_FALL 2
+/* Motion, in sixteenths of a pixel per frame.  SUB_PX of them make a pixel. */
+#define SUB_PX 16
+#define WALK_SPEED 20    /* 1.25 px per frame */
+#define RUN_SPEED 32     /* 2.00 px per frame */
+#define FOE_SPEED 8      /* 0.50 px per frame */
+#define GRAVITY 3        /* 0.1875 px per frame, per frame */
+#define JUMP_SPEED 72    /* 4.5 px per frame upwards: about 54 px of rise */
+#define JUMP_CUT 16      /* releasing A trims the rise to 1 px per frame */
+#define MAX_FALL 64      /* terminal speed, 4 px per frame */
+/* Vertical speed is biased so one unsigned byte can hold both directions. */
+#define VY_ZERO 128
+#define VY_REST 128
+#define VY_JUMP 56       /* VY_ZERO - JUMP_SPEED */
+#define VY_CUT 112       /* VY_ZERO - JUMP_CUT */
+#define VY_MAX_FALL 192  /* VY_ZERO + MAX_FALL */
+
+/* The hero's hitbox is inset from its 16x16 sprite, so a one-cell gap is
+ * comfortable to walk and jump through instead of pixel-perfect. */
+#define BOX_L 3
+#define BOX_R 12
+#define BOX_B 15
+
+/* How close two 16x16 actors have to be before they touch. */
+#define HIT_X 12
+#define HIT_Y 13
+/* Landing this far above a patrol squashes it instead of hurting the hero. */
+#define STOMP_Y 6
+
+#define WALK_ANIM 7      /* frames between walk frames */
 
 #define ST_TITLE 0
 #define ST_INTRO 1
@@ -135,13 +167,26 @@ const unsigned char CELL_PAL[8] = { 0, 2, 2, 1, 3, 1, 3, 0 };
 
 const unsigned char CELL_SOLID[8] = { 0, 1, 1, 1, 0, 0, 0, 0 };
 
-/* Rise steps, in frames, ending with the 0 sentinel: three cells up over
- * sixteen frames.  Releasing A after the first step cuts the jump short. */
-const unsigned char JUMP_DELAY[4] = { 4, 5, 7, 0 };
-
-/* Fall steps, in frames.  The first entry is the apex hang, which is what
- * lets a jump drift onto a ledge instead of dropping straight down. */
-const unsigned char FALL_DELAY[8] = { 10, 7, 6, 5, 5, 5, 5, 5 };
+/* Screen pixel to cell column or row.  A table costs 256 ROM bytes and saves
+ * a software divide on every collision probe. */
+const unsigned char PIXEL_CELL[256] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+    13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+    14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+};
 
 /* STAGE 1 - a walk, a two-cell pit, and a short climb */
 const unsigned char LEVEL1[240] = {
@@ -306,10 +351,11 @@ unsigned char q_count;
 
 unsigned char foe_x[MAX_FOES];
 unsigned char foe_y[MAX_FOES];
+unsigned char foe_sub[MAX_FOES];
 unsigned char foe_dir[MAX_FOES];
 unsigned char foe_live[MAX_FOES];
-unsigned char foe_timer[MAX_FOES];
 unsigned char foe_frame[MAX_FOES];
+unsigned char foe_anim[MAX_FOES];
 unsigned char foe_count;
 
 unsigned char score_digits[5];
@@ -319,26 +365,23 @@ unsigned char stage;
 unsigned char lives;
 unsigned char gems_left;
 unsigned char pause_timer;
-unsigned char frame;
 unsigned char pad;
 unsigned char prev_pad;
 unsigned char hud_dirty;
 
-unsigned char px;
-unsigned char py;
+unsigned char hero_x;
+unsigned char hero_y;
+unsigned char hero_xs;
+unsigned char hero_ys;
+unsigned char hero_vy;
+unsigned char hero_grounded;
+unsigned char hero_airborne;
 unsigned char facing;
 unsigned char walk_frame;
-unsigned char walk_timer;
-unsigned char vstate;
-unsigned char jump_phase;
-unsigned char jump_timer;
-unsigned char fall_phase;
-unsigned char fall_timer;
+unsigned char walk_anim;
 
-unsigned char hero_px;
-unsigned char hero_py;
-unsigned char hero_pose;
-unsigned char hero_dirty;
+/* advance_sub() reports how many whole pixels the accumulator carried. */
+unsigned char step_count;
 
 /* ---------------------------------------------------------------- level */
 
@@ -391,6 +434,57 @@ unsigned char cell_palette(unsigned char cx, unsigned char cy)
     return CELL_PAL[cell_at(cx, cy)];
 }
 
+/* ------------------------------------------------------ fixed point maths */
+
+/* Add `delta` sixteenths of a pixel to an accumulator and hand back the
+ * remainder, leaving the whole pixels it carried in step_count. */
+unsigned char advance_sub(unsigned char acc, unsigned char delta)
+{
+    step_count = 0;
+    acc = acc + delta;
+    while (acc >= SUB_PX) {
+        acc = acc - SUB_PX;
+        step_count = step_count + 1;
+    }
+    return acc;
+}
+
+/* Would the hero's hitbox overlap solid ground at this pixel position? */
+unsigned char box_blocked(unsigned char x, unsigned char y)
+{
+    unsigned char left;
+    unsigned char right;
+    unsigned char top;
+    unsigned char bottom;
+
+    left = PIXEL_CELL[x + BOX_L];
+    right = PIXEL_CELL[x + BOX_R];
+    top = PIXEL_CELL[y];
+    bottom = PIXEL_CELL[y + BOX_B];
+
+    if (is_solid(left, top)) {
+        return 1;
+    }
+    if (is_solid(right, top)) {
+        return 1;
+    }
+    if (is_solid(left, bottom)) {
+        return 1;
+    }
+    if (is_solid(right, bottom)) {
+        return 1;
+    }
+    return 0;
+}
+
+unsigned char hero_on_floor(void)
+{
+    if (hero_y >= PIT_Y) {
+        return 0;
+    }
+    return box_blocked(hero_x, hero_y + 1);
+}
+
 /* ----------------------------------------------------------- tile queue */
 
 void push_tile(unsigned char x, unsigned char y, unsigned char tile)
@@ -420,22 +514,6 @@ void push_cell(unsigned char cx, unsigned char cy)
     push_tile(tx + 1, ty, CELL_TR[kind]);
     push_tile(tx, ty + 1, CELL_BL[kind]);
     push_tile(tx + 1, ty + 1, CELL_BR[kind]);
-}
-
-void push_actor(unsigned char cx, unsigned char cy, unsigned char base)
-{
-    unsigned char tx;
-    unsigned char ty;
-
-    if (cy == 0 || cy >= GRID_H) {
-        return;
-    }
-    tx = cx + cx;
-    ty = cy + cy;
-    push_tile(tx, ty, base);
-    push_tile(tx + 1, ty, base + 1);
-    push_tile(tx, ty + 1, base + 2);
-    push_tile(tx + 1, ty + 1, base + 3);
 }
 
 /* Drain the queue, pausing for a fresh vblank every TILES_PER_VBLANK writes.
@@ -563,19 +641,6 @@ void draw_level_off(void)
     }
 }
 
-void draw_actor_off(unsigned char cx, unsigned char cy, unsigned char base)
-{
-    unsigned char tx;
-    unsigned char ty;
-
-    tx = cx + cx;
-    ty = cy + cy;
-    ppu_put(tx, ty, base);
-    ppu_put(tx + 1, ty, base + 1);
-    ppu_put(tx, ty + 1, base + 2);
-    ppu_put(tx + 1, ty + 1, base + 3);
-}
-
 /* -------------------------------------------------------------- the HUD */
 
 void draw_hud_values_off(void)
@@ -651,11 +716,11 @@ void clear_score(void)
     }
 }
 
-/* ------------------------------------------------------------- the hero */
+/* ---------------------------------------------------------- the sprites */
 
 unsigned char hero_pose_tile(void)
 {
-    if (vstate != VS_GROUND) {
+    if (!hero_grounded) {
         if (facing) {
             return HERO_JUMP_R;
         }
@@ -673,29 +738,39 @@ unsigned char hero_pose_tile(void)
     return HERO_IDLE_L;
 }
 
-void begin_fall(void)
+/* One 16x16 actor is four 8x8 sprites in reading order, matching the tile
+ * order the CHR generator lays a metatile out in. */
+void put_actor(unsigned char x, unsigned char y, unsigned char base,
+               unsigned char pal)
 {
-    vstate = VS_FALL;
-    fall_phase = 0;
-    fall_timer = FALL_DELAY[0];
-    hero_dirty = 1;
+    oam_sprite(x, y, base, pal);
+    oam_sprite(x + 8, y, base + 1, pal);
+    oam_sprite(x, y + 8, base + 2, pal);
+    oam_sprite(x + 8, y + 8, base + 3, pal);
 }
 
-void begin_jump(void)
+void draw_actors(void)
 {
-    vstate = VS_JUMP;
-    jump_phase = 0;
-    jump_timer = JUMP_DELAY[0];
-    hero_dirty = 1;
-    sfx_play(SFX_JUMP);
+    unsigned char i;
+    unsigned char base;
+
+    oam_reset();
+    put_actor(hero_x, hero_y, hero_pose_tile(), PAL_HERO);
+    i = 0;
+    while (i < MAX_FOES) {
+        if (foe_live[i]) {
+            if (foe_frame[i]) {
+                base = FOE_TILE_B;
+            } else {
+                base = FOE_TILE_A;
+            }
+            put_actor(foe_x[i], foe_y[i], base, PAL_FOE);
+        }
+        i = i + 1;
+    }
 }
 
-void land_hero(void)
-{
-    vstate = VS_GROUND;
-    hero_dirty = 1;
-    sfx_play(SFX_LAND);
-}
+/* ------------------------------------------------------------- the hero */
 
 void lose_life(void)
 {
@@ -712,18 +787,15 @@ void stage_cleared(void)
     pause_timer = CLEAR_FRAMES;
 }
 
-/* Whatever the hero just stepped into. */
-void touch_cell(void)
+/* Whatever the hero is standing in right now. */
+void touch_one(unsigned char cx, unsigned char cy)
 {
     unsigned char kind;
 
-    if (py >= GRID_H) {
-        lose_life();
-        return;
-    }
-    kind = cell_at(px, py);
+    kind = cell_at(cx, cy);
     if (kind == C_GEM) {
-        level[py * GRID_W + px] = C_EMPTY;
+        level[cy * GRID_W + cx] = C_EMPTY;
+        push_cell(cx, cy);
         gems_left = gems_left - 1;
         add_points(1);
         sfx_play(SFX_GEM);
@@ -738,164 +810,230 @@ void touch_cell(void)
     }
 }
 
-/* Walking off a ledge starts a fall; drifting over one during a fall lands. */
-void settle_hero(void)
+void touch_cells(void)
 {
-    if (vstate == VS_GROUND) {
-        if (!is_solid(px, py + 1)) {
-            begin_fall();
-        }
-        return;
+    unsigned char left;
+    unsigned char right;
+    unsigned char top;
+    unsigned char bottom;
+
+    left = PIXEL_CELL[hero_x + BOX_L];
+    right = PIXEL_CELL[hero_x + BOX_R];
+    top = PIXEL_CELL[hero_y];
+    bottom = PIXEL_CELL[hero_y + BOX_B];
+
+    touch_one(left, top);
+    if (right != left && game_state == ST_PLAY) {
+        touch_one(right, top);
     }
-    if (vstate == VS_FALL) {
-        if (is_solid(px, py + 1)) {
-            land_hero();
+    if (bottom != top) {
+        if (game_state == ST_PLAY) {
+            touch_one(left, bottom);
+        }
+        if (right != left && game_state == ST_PLAY) {
+            touch_one(right, bottom);
         }
     }
 }
 
-void step_walk(void)
+void move_hero_x(void)
 {
-    unsigned char nx;
-    unsigned char want_right;
+    unsigned char delta;
+    unsigned char steps;
+    unsigned char i;
     unsigned char moving;
 
-    moving = 0;
-    want_right = 0;
+    moving = 1;
     if (pad & PAD_RIGHT) {
-        moving = 1;
-        want_right = 1;
+        facing = 1;
     } else if (pad & PAD_LEFT) {
-        moving = 1;
+        facing = 0;
+    } else {
+        moving = 0;
     }
 
     if (!moving) {
-        walk_timer = 0;
+        hero_xs = 0;
+        walk_anim = 0;
+        walk_frame = 0;
         return;
     }
 
-    if (want_right != facing) {
-        facing = want_right;
-        hero_dirty = 1;
-    }
-
-    if (walk_timer > 0) {
-        walk_timer = walk_timer - 1;
-        return;
-    }
     if (pad & PAD_B) {
-        walk_timer = RUN_DELAY;
+        delta = RUN_SPEED;
     } else {
-        walk_timer = WALK_DELAY;
+        delta = WALK_SPEED;
     }
+    hero_xs = advance_sub(hero_xs, delta);
+    steps = step_count;
 
-    if (want_right) {
-        nx = px + 1;
-    } else {
-        nx = px - 1;
-    }
-    if (is_solid(nx, py)) {
-        return;
-    }
-    px = nx;
-    walk_frame = !walk_frame;
-    hero_dirty = 1;
-    touch_cell();
-    if (game_state != ST_PLAY) {
-        return;
-    }
-    settle_hero();
-}
-
-void step_vertical(void)
-{
-    if (vstate == VS_JUMP) {
-        /* Letting go of A after the first rise step cuts the arc short. */
-        if (jump_phase > 0 && !(pad & PAD_A)) {
-            begin_fall();
-            return;
-        }
-        if (jump_timer > 0) {
-            jump_timer = jump_timer - 1;
-            return;
-        }
-        if (is_solid(px, py - 1)) {
-            begin_fall();
-            return;
-        }
-        py = py - 1;
-        hero_dirty = 1;
-        jump_phase = jump_phase + 1;
-        if (JUMP_DELAY[jump_phase] == 0) {
-            begin_fall();
+    i = 0;
+    while (i < steps) {
+        if (facing) {
+            if (hero_x >= MAX_X || box_blocked(hero_x + 1, hero_y)) {
+                hero_xs = 0;
+                i = steps;
+            } else {
+                hero_x = hero_x + 1;
+                i = i + 1;
+            }
         } else {
-            jump_timer = JUMP_DELAY[jump_phase];
+            if (hero_x == 0 || box_blocked(hero_x - 1, hero_y)) {
+                hero_xs = 0;
+                i = steps;
+            } else {
+                hero_x = hero_x - 1;
+                i = i + 1;
+            }
         }
-        touch_cell();
-        return;
     }
-    if (vstate == VS_FALL) {
-        if (fall_timer > 0) {
-            fall_timer = fall_timer - 1;
-            return;
+
+    if (hero_grounded) {
+        walk_anim = walk_anim + 1;
+        if (walk_anim >= WALK_ANIM) {
+            walk_anim = 0;
+            walk_frame = !walk_frame;
         }
-        if (is_solid(px, py + 1)) {
-            land_hero();
-            return;
-        }
-        py = py + 1;
-        hero_dirty = 1;
-        if (fall_phase < 7) {
-            fall_phase = fall_phase + 1;
-        }
-        fall_timer = FALL_DELAY[fall_phase];
-        touch_cell();
-        return;
-    }
-    if (!is_solid(px, py + 1)) {
-        begin_fall();
     }
 }
 
-/* ----------------------------------------------------------- the patrols */
-
-void push_foe(unsigned char i)
+void move_hero_y(void)
 {
-    if (foe_frame[i]) {
-        push_actor(foe_x[i], foe_y[i], FOE_TILE_B);
+    unsigned char delta;
+    unsigned char steps;
+    unsigned char i;
+    unsigned char going_up;
+
+    if (hero_vy < VY_ZERO) {
+        going_up = 1;
+        delta = VY_ZERO - hero_vy;
     } else {
-        push_actor(foe_x[i], foe_y[i], FOE_TILE_A);
+        going_up = 0;
+        delta = hero_vy - VY_ZERO;
+    }
+
+    hero_ys = advance_sub(hero_ys, delta);
+    steps = step_count;
+
+    i = 0;
+    while (i < steps) {
+        if (going_up) {
+            if (box_blocked(hero_x, hero_y - 1)) {
+                /* A bumped head drops the rest of the rise. */
+                hero_vy = VY_ZERO;
+                hero_ys = 0;
+                i = steps;
+            } else {
+                hero_y = hero_y - 1;
+                i = i + 1;
+            }
+        } else {
+            if (box_blocked(hero_x, hero_y + 1)) {
+                hero_vy = VY_ZERO;
+                hero_ys = 0;
+                if (hero_airborne) {
+                    sfx_play(SFX_LAND);
+                    hero_airborne = 0;
+                }
+                i = steps;
+            } else {
+                hero_y = hero_y + 1;
+                if (hero_y >= PIT_Y) {
+                    lose_life();
+                    return;
+                }
+                i = i + 1;
+            }
+        }
     }
 }
 
-/* Patrols walk until a wall or a ledge turns them around.  One patrol is
- * serviced per frame so a single frame never queues more than one of them. */
+/* ---------------------------------------------------------- the patrols */
+
 void step_foe(unsigned char i)
 {
-    unsigned char nx;
+    unsigned char lead;
+    unsigned char ahead;
 
     if (!foe_live[i]) {
         return;
     }
-    if (foe_timer[i] > 0) {
-        foe_timer[i] = foe_timer[i] - 1;
+
+    foe_anim[i] = foe_anim[i] + 1;
+    if (foe_anim[i] >= 12) {
+        foe_anim[i] = 0;
+        foe_frame[i] = !foe_frame[i];
+    }
+
+    foe_sub[i] = advance_sub(foe_sub[i], FOE_SPEED);
+    if (step_count == 0) {
         return;
     }
-    foe_timer[i] = FOE_DELAY;
 
     if (foe_dir[i]) {
-        nx = foe_x[i] + 1;
+        if (foe_x[i] >= MAX_X) {
+            foe_dir[i] = 0;
+            return;
+        }
+        lead = foe_x[i] + CELL_PX;
     } else {
-        nx = foe_x[i] - 1;
+        if (foe_x[i] == 0) {
+            foe_dir[i] = 1;
+            return;
+        }
+        lead = foe_x[i] - 1;
     }
-    if (is_solid(nx, foe_y[i]) || !is_solid(nx, foe_y[i] + 1)) {
+
+    ahead = PIXEL_CELL[lead];
+    /* Turn at a wall, and turn at a ledge rather than walking off it. */
+    if (is_solid(ahead, PIXEL_CELL[foe_y[i] + 8])) {
         foe_dir[i] = !foe_dir[i];
         return;
     }
-    push_cell(foe_x[i], foe_y[i]);
-    foe_x[i] = nx;
-    foe_frame[i] = !foe_frame[i];
-    push_foe(i);
+    if (!is_solid(ahead, PIXEL_CELL[foe_y[i] + CELL_PX])) {
+        foe_dir[i] = !foe_dir[i];
+        return;
+    }
+
+    if (foe_dir[i]) {
+        foe_x[i] = foe_x[i] + 1;
+    } else {
+        foe_x[i] = foe_x[i] - 1;
+    }
+}
+
+void step_foes(void)
+{
+    unsigned char i;
+
+    i = 0;
+    while (i < MAX_FOES) {
+        step_foe(i);
+        i = i + 1;
+    }
+}
+
+unsigned char foe_touches_hero(unsigned char i)
+{
+    unsigned char gap;
+
+    if (hero_x >= foe_x[i]) {
+        gap = hero_x - foe_x[i];
+    } else {
+        gap = foe_x[i] - hero_x;
+    }
+    if (gap >= HIT_X) {
+        return 0;
+    }
+    if (hero_y >= foe_y[i]) {
+        gap = hero_y - foe_y[i];
+    } else {
+        gap = foe_y[i] - hero_y;
+    }
+    if (gap >= HIT_Y) {
+        return 0;
+    }
+    return 1;
 }
 
 void check_foes(void)
@@ -904,17 +1042,15 @@ void check_foes(void)
 
     i = 0;
     while (i < MAX_FOES) {
-        if (foe_live[i] && foe_x[i] == px && foe_y[i] == py) {
-            if (vstate == VS_FALL) {
+        if (foe_live[i] && foe_touches_hero(i)) {
+            /* Coming down from above squashes the patrol; anything else
+             * hurts. */
+            if (hero_vy > VY_ZERO && foe_y[i] >= hero_y + STOMP_Y) {
                 foe_live[i] = 0;
-                push_cell(foe_x[i], foe_y[i]);
                 add_points(2);
                 sfx_play(SFX_STOMP);
-                /* Bounce off the squashed patrol. */
-                vstate = VS_JUMP;
-                jump_phase = 1;
-                jump_timer = JUMP_DELAY[1];
-                hero_dirty = 1;
+                hero_vy = VY_ZERO - JUMP_SPEED / 2;
+                hero_airborne = 1;
             } else {
                 lose_life();
                 return;
@@ -946,12 +1082,13 @@ void load_stage(void)
         if (kind == C_FOE) {
             kind = C_EMPTY;
             if (foe_count < MAX_FOES) {
-                foe_x[foe_count] = i % GRID_W;
-                foe_y[foe_count] = i / GRID_W;
+                foe_x[foe_count] = (i % GRID_W) * CELL_PX;
+                foe_y[foe_count] = (i / GRID_W) * CELL_PX;
+                foe_sub[foe_count] = 0;
                 foe_dir[foe_count] = foe_count & 1;
                 foe_live[foe_count] = 1;
-                foe_timer[foe_count] = FOE_DELAY;
                 foe_frame[foe_count] = 0;
+                foe_anim[foe_count] = 0;
                 foe_count = foe_count + 1;
             }
         }
@@ -962,20 +1099,16 @@ void load_stage(void)
         i = i + 1;
     }
 
-    px = SPAWN_X[stage];
-    py = SPAWN_Y[stage];
+    hero_x = SPAWN_X[stage] * CELL_PX;
+    hero_y = SPAWN_Y[stage] * CELL_PX;
+    hero_xs = 0;
+    hero_ys = 0;
+    hero_vy = VY_REST;
+    hero_grounded = 1;
+    hero_airborne = 0;
     facing = 1;
     walk_frame = 0;
-    walk_timer = 0;
-    vstate = VS_GROUND;
-    jump_phase = 0;
-    jump_timer = 0;
-    fall_phase = 0;
-    fall_timer = 0;
-    hero_px = px;
-    hero_py = py;
-    hero_pose = HERO_IDLE_R;
-    hero_dirty = 0;
+    walk_anim = 0;
     hud_dirty = 0;
 
     wait_vblank();
@@ -983,15 +1116,8 @@ void load_stage(void)
     draw_hud_off();
     draw_level_off();
     draw_attributes_off();
-    draw_actor_off(px, py, hero_pose);
-    i = 0;
-    while (i < MAX_FOES) {
-        if (foe_live[i]) {
-            draw_actor_off(foe_x[i], foe_y[i], FOE_TILE_A);
-        }
-        i = i + 1;
-    }
     game_state = ST_PLAY;
+    draw_actors();
     wait_vblank();
     ppu_on();
 }
@@ -1007,12 +1133,6 @@ void show_title(void)
 
     draw_text_off(13, 4, TXT_FAMIC);
     draw_text_off(11, 6, TXT_TITLE);
-
-    /* A cast line so the title screen shows what the tiles look like. */
-    draw_actor_off(5, 6, HERO_IDLE_R);
-    draw_actor_off(8, 6, GEM_TILE);
-    draw_actor_off(11, 6, FOE_TILE_A);
-
     draw_text_off(10, 17, TXT_MOVE);
     draw_text_off(10, 18, TXT_JUMP);
     draw_text_off(10, 19, TXT_RUN);
@@ -1021,6 +1141,15 @@ void show_title(void)
     game_state = ST_TITLE;
     wait_vblank();
     ppu_on();
+}
+
+/* The title screen shows the cast as real sprites, in their own palettes. */
+void draw_title_cast(void)
+{
+    oam_reset();
+    put_actor(88, 96, HERO_IDLE_R, PAL_HERO);
+    put_actor(120, 96, GEM_TILE, PAL_FOE);
+    put_actor(152, 96, FOE_TILE_A, PAL_FOE);
 }
 
 void show_stage_intro(void)
@@ -1034,8 +1163,18 @@ void show_stage_intro(void)
     draw_text_off(13, 16, TXT_READY);
     game_state = ST_INTRO;
     pause_timer = INTRO_FRAMES;
+    oam_reset();
     wait_vblank();
     ppu_on();
+}
+
+void draw_score_off(unsigned char x, unsigned char y)
+{
+    ppu_put(x, y, TILE_DIGIT0 + score_digits[4]);
+    ppu_put(x + 1, y, TILE_DIGIT0 + score_digits[3]);
+    ppu_put(x + 2, y, TILE_DIGIT0 + score_digits[2]);
+    ppu_put(x + 3, y, TILE_DIGIT0 + score_digits[1]);
+    ppu_put(x + 4, y, TILE_DIGIT0 + score_digits[0]);
 }
 
 void show_stage_clear(void)
@@ -1046,11 +1185,8 @@ void show_stage_clear(void)
     fill_attributes_off(2);
     draw_text_off(10, 13, TXT_CLEAR);
     draw_text_off(10, 16, TXT_SCORE);
-    ppu_put(16, 16, TILE_DIGIT0 + score_digits[4]);
-    ppu_put(17, 16, TILE_DIGIT0 + score_digits[3]);
-    ppu_put(18, 16, TILE_DIGIT0 + score_digits[2]);
-    ppu_put(19, 16, TILE_DIGIT0 + score_digits[1]);
-    ppu_put(20, 16, TILE_DIGIT0 + score_digits[0]);
+    draw_score_off(16, 16);
+    oam_reset();
     wait_vblank();
     ppu_on();
 }
@@ -1063,14 +1199,11 @@ void show_game_over(void)
     fill_attributes_off(1);
     draw_text_off(11, 12, TXT_GAME_OVER);
     draw_text_off(10, 16, TXT_SCORE);
-    ppu_put(16, 16, TILE_DIGIT0 + score_digits[4]);
-    ppu_put(17, 16, TILE_DIGIT0 + score_digits[3]);
-    ppu_put(18, 16, TILE_DIGIT0 + score_digits[2]);
-    ppu_put(19, 16, TILE_DIGIT0 + score_digits[1]);
-    ppu_put(20, 16, TILE_DIGIT0 + score_digits[0]);
+    draw_score_off(16, 16);
     draw_text_off(10, 21, TXT_PRESS_START);
     game_state = ST_OVER;
     sfx_play(SFX_OVER);
+    oam_reset();
     wait_vblank();
     ppu_on();
 }
@@ -1084,14 +1217,11 @@ void show_win(void)
     draw_text_off(8, 10, TXT_CONGRATS);
     draw_text_off(8, 13, TXT_ALL_CLEAR);
     draw_text_off(10, 17, TXT_SCORE);
-    ppu_put(16, 17, TILE_DIGIT0 + score_digits[4]);
-    ppu_put(17, 17, TILE_DIGIT0 + score_digits[3]);
-    ppu_put(18, 17, TILE_DIGIT0 + score_digits[2]);
-    ppu_put(19, 17, TILE_DIGIT0 + score_digits[1]);
-    ppu_put(20, 17, TILE_DIGIT0 + score_digits[0]);
+    draw_score_off(16, 17);
     draw_text_off(10, 21, TXT_PRESS_START);
     game_state = ST_WIN;
     sfx_play(SFX_CLEAR);
+    oam_reset();
     wait_vblank();
     ppu_on();
 }
@@ -1100,6 +1230,7 @@ void show_win(void)
 
 void tick_title(void)
 {
+    draw_title_cast();
     if (pad & PAD_START) {
         if (!(prev_pad & PAD_START)) {
             stage = 0;
@@ -1163,46 +1294,56 @@ void tick_end_screen(void)
 
 void tick_play(void)
 {
-    unsigned char pose;
+    hero_grounded = hero_on_floor();
 
-    if (vstate == VS_GROUND && (pad & PAD_A) && !(prev_pad & PAD_A)) {
-        begin_jump();
+    if (hero_grounded && (pad & PAD_A) && !(prev_pad & PAD_A)) {
+        hero_vy = VY_JUMP;
+        hero_grounded = 0;
+        hero_airborne = 1;
+        sfx_play(SFX_JUMP);
+    } else if (hero_grounded) {
+        hero_vy = VY_REST;
     }
 
-    step_walk();
+    /* Letting go of A part way up trims the rise, so a tap is a short hop. */
+    if (!(pad & PAD_A) && hero_vy < VY_CUT) {
+        hero_vy = VY_CUT;
+    }
+
+    if (hero_vy < VY_MAX_FALL) {
+        hero_vy = hero_vy + GRAVITY;
+        if (hero_vy > VY_MAX_FALL) {
+            hero_vy = VY_MAX_FALL;
+        }
+    }
+
+    move_hero_x();
+    move_hero_y();
     if (game_state != ST_PLAY) {
         return;
     }
 
-    step_vertical();
+    hero_grounded = hero_on_floor();
+    if (!hero_grounded) {
+        hero_airborne = 1;
+    }
+
+    touch_cells();
     if (game_state != ST_PLAY) {
         return;
     }
 
-    step_foe(frame & 3);
+    step_foes();
     check_foes();
     if (game_state != ST_PLAY) {
         return;
-    }
-
-    pose = hero_pose_tile();
-    if (px != hero_px || py != hero_py) {
-        push_cell(hero_px, hero_py);
-        hero_px = px;
-        hero_py = py;
-        push_actor(px, py, pose);
-        hero_pose = pose;
-        hero_dirty = 0;
-    } else if (hero_dirty || pose != hero_pose) {
-        push_actor(px, py, pose);
-        hero_pose = pose;
-        hero_dirty = 0;
     }
 
     if (hud_dirty) {
         push_hud_values();
         hud_dirty = 0;
     }
+    draw_actors();
 }
 
 void main(void)
@@ -1211,7 +1352,6 @@ void main(void)
      * been written at least once. */
     pad = 0;
     prev_pad = 0;
-    frame = 0;
     stage = 0;
     lives = START_LIVES;
     gems_left = 0;
@@ -1219,20 +1359,17 @@ void main(void)
     q_count = 0;
     foe_count = 0;
     hud_dirty = 0;
-    hero_dirty = 0;
-    hero_px = 0;
-    hero_py = 0;
-    hero_pose = HERO_IDLE_R;
-    px = 0;
-    py = 0;
+    hero_x = 0;
+    hero_y = 0;
+    hero_xs = 0;
+    hero_ys = 0;
+    hero_vy = VY_REST;
+    hero_grounded = 1;
+    hero_airborne = 0;
     facing = 1;
     walk_frame = 0;
-    walk_timer = 0;
-    vstate = VS_GROUND;
-    jump_phase = 0;
-    jump_timer = 0;
-    fall_phase = 0;
-    fall_timer = 0;
+    walk_anim = 0;
+    step_count = 0;
     clear_score();
 
     show_title();
@@ -1259,6 +1396,5 @@ void main(void)
         wait_vblank();
         flush_tiles();
         prev_pad = pad;
-        frame = frame + 1;
     }
 }

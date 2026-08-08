@@ -104,7 +104,10 @@ python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm 
 extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
 extern unsigned char read_pad(void);
 extern unsigned char rand8(void);
-extern void sfx_play(unsigned char effect);</code></pre>
+extern void sfx_play(unsigned char effect);
+extern void oam_reset(void);
+extern void oam_sprite(unsigned char x, unsigned char y,
+                       unsigned char tile, unsigned char attr);</code></pre>
           </article>
           <article>
             <h3>Current Limits</h3>
@@ -158,12 +161,16 @@ extern void sfx_play(unsigned char effect);</code></pre>
     <section class="wrap">
       <h2>Example: Platformer</h2>
       <p>
-        The example in <code>examples/platformer.c</code> shows what a background-only runtime can
-        still do. It is built on a 16x16 metatile grid - 16 cells across, 15 down, with cell row 0
-        as the status bar - so one cell is at once the unit of collision, of level storage, and of
-        the attribute table. Cells choose their own background palette, while the hero and the
-        patrols are drawn in colour 3 alone, which is white in all four palettes, so they stay
-        readable wherever they walk.
+        The example in <code>examples/platformer.c</code> draws its stage as background metatiles -
+        16 cells across, 15 down, with cell row 0 as the status bar - so one cell is at once the
+        unit of level storage and one attribute quadrant, and every cell picks its own background
+        palette. The hero and the patrols are hardware sprites on top of it.
+      </p>
+      <p>
+        Actors move in pixels rather than in cells. Positions are 12.4 fixed point: a pixel byte
+        plus a sixteenth-of-a-pixel accumulator, so a speed like 1.25 px per frame is exact and the
+        motion is smooth. Vertical motion is a real velocity with gravity, which gives the jump its
+        arc and makes its height depend on how long A is held.
       </p>
       <pre><code>python .\famic.py build .\examples\platformer.c -o .\build\platformer.nes --asm .\build\platformer.asm</code></pre>
       <div class="columns">
@@ -180,11 +187,13 @@ extern void sfx_play(unsigned char effect);</code></pre>
           <h3>NES Presentation and Systems</h3>
           <ul>
             <li>Four stages of gems, patrols, spike pits, bottomless gaps and an exit door</li>
-            <li>Frame-timed physics: twelve frames per walk step, three cells of rise over sixteen</li>
-            <li>Variable jump height and mid-air control, with an apex hang that lets a jump reach a ledge</li>
+            <li>Subpixel motion: 1.25 px per frame walking, 2 running, and about 54 px of jump</li>
+            <li>Gravity-driven jump with variable height and full mid-air control</li>
+            <li>A hitbox inset from the 16x16 sprite, so a one-cell gap is comfortable to pass</li>
             <li>Stomping a patrol while falling squashes it and bounces the hero</li>
             <li>Per-cell attributes packed from the level map when a stage loads</li>
-            <li>A redraw queue flushed at most eight tiles per vblank, so the PPU is never written late</li>
+            <li>A shadow OAM refilled every frame and copied out by the NMI with $4014</li>
+            <li>A redraw queue flushed at most six tiles per vblank, so the PPU is never written late</li>
             <li>Sound effects for jumps, landings, gems, stomps, damage, stage clears and game over</li>
             <li>Title, stage intro, play, death, stage clear, game over and all-clear screens</li>
           </ul>

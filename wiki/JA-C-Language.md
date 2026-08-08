@@ -30,6 +30,21 @@ extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
 extern unsigned char read_pad(void);
 extern unsigned char rand8(void);
 ```
+
+`oam_reset` と `oam_sprite` を一緒に宣言するとスプライトランタイムが有効に
+なります。`$0200` にページ境界へ揃えたシャドー OAM を置き、NMI から
+`$4014` で転送し、`$2001` でスプライトを有効にします。
+
+```c
+extern void oam_reset(void);
+extern void oam_sprite(unsigned char x, unsigned char y, unsigned char tile,
+                       unsigned char attr);
+```
+
+`oam_reset()` はスプライト 64 個を画面下へ送り、書き込み位置を巻き戻します。
+`oam_sprite()` は 8x8 スプライトを 1 つずつ追加し、`attr` は通常の OAM 属性
+バイトです。毎フレーム一覧を作り直してください。最大 63 個まで保持され、
+PPU が 1 走査線に描けるのは変わらず 8 個までです。
 ### 効果音
 
 プログラムが `sfx_play` を宣言し、ドライバーが参照する 5 つの const テーブルを

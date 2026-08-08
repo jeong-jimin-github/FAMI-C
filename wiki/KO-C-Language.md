@@ -30,6 +30,21 @@ extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
 extern unsigned char read_pad(void);
 extern unsigned char rand8(void);
 ```
+
+`oam_reset`와 `oam_sprite`를 함께 선언하면 스프라이트 런타임이 켜집니다.
+`$0200`에 페이지 정렬된 섀도 OAM을 두고, NMI에서 `$4014`로 전송하며,
+`$2001`에서 스프라이트를 활성화합니다.
+
+```c
+extern void oam_reset(void);
+extern void oam_sprite(unsigned char x, unsigned char y, unsigned char tile,
+                       unsigned char attr);
+```
+
+`oam_reset()`은 스프라이트 64개를 화면 아래로 보내고 쓰기 위치를 되감습니다.
+`oam_sprite()`는 8x8 스프라이트를 하나씩 추가하며 `attr`은 일반적인 OAM
+속성 바이트입니다. 매 프레임 목록을 다시 채우면 됩니다. 최대 63개까지
+보관되고, PPU는 여전히 한 스캔라인에 8개까지만 그립니다.
 ### 효과음
 
 프로그램이 `sfx_play`를 선언하고 드라이버가 참조하는 5개의 const 테이블을

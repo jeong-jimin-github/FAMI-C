@@ -536,10 +536,20 @@ def manifest() -> Dict[str, object]:
         "target": {
             "mapper": 0,
             "name": "NROM-256",
+            "mirroring": "vertical",
             "prg_bytes": 0x8000,
             "chr_bytes": 0x2000,
-            "ram_bytes": 0x0800,
-            "max_tiles": 512,
+            # Both pattern tables point at $0000, so background and sprites
+            # share one set of 256 tiles.
+            "max_tiles": 256,
+            # $0300-$07FF; the pages below are the stack, the shadow OAM and
+            # the runtime's own zero page.
+            "ram_bytes": 1280,
+            "zeropage_bytes": 240,
+            "max_sprites": 64,
+            "max_sprites_per_scanline": 8,
+            "bg_tiles_per_frame": 32,
+            "frames_per_second": 60,
         },
         "types": [
             {"name": "u8", "bits": 8, "signed": False},

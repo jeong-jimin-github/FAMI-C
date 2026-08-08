@@ -1,0 +1,1494 @@
+"""Type-aware 6502 code generation.
+
+The important departure from the original backend is that types are real.
+`int score;` is sixteen bits and stays sixteen bits; it does not silently wrap
+at 255.  A silent wrap is the worst failure mode this toolchain can have,
+because the program still compiles, still runs, and gives an agent no signal
+at all about what went wrong.
+
+Value conventions
+-----------------
+* 8-bit expression result: A.
+* 16-bit expression result: A = low byte, `__ah` = high byte.
+* Sub-expressions spill to the hardware stack, so nesting is unlimited.
+* u16 arrays are stored as two parallel byte arrays (`_g_x` and `_g_x__hi`)
+  so indexing never needs a 16-bit multiply.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+from . import ast
+from .api import BY_NAME, BUILTINS, CONSTANTS, STR
+from .assets import CompiledAssets
+from .diagnostics import CompileError, DiagnosticBag
+from .runtime import Runtime, emitted_builtins, modules_for_calls
+from .types import (
+    ArrayType,
+    I16,
+    I8,
+    Member,
+    Scalar,
+    StructType,
+    U16,
+    U8,
+    VOID,
+    promote,
+)
+
+
+@dataclass
+class Symbol:
+    name: str
+    label: str
+    type: object                    # Scalar or StructType
+    dims: List[int] = field(default_factory=list)
+    is_const: bool = False
+    is_global: bool = False
+    members: Dict[str, str] = field(default_factory=dict)  # member -> label
+
+    @property
+    def is_array(self) -> bool:
+        return bool(self.dims)
+
+    @property
+    def count(self) -> int:
+        total = 1
+        for d in self.dims:
+            total *= d
+        return total
+
+
+@dataclass
+class LValue:
+    """A resolved storage location: a label, plus an optional index expression."""
+
+    label: str
+    label_hi: str
+    type: Scalar
+    index: Optional[ast.Expr] = None
+    is_const: bool = False
+
+
+class CodeGenerator:
+    def __init__(
+        self,
+        program: ast.Program,
+        assets: CompiledAssets,
+        warnings: DiagnosticBag,
+        file: str = "",
+    ):
+        self.program = program
+        self.assets = assets
+        self.warnings = warnings
+        self.file = file
+
+        self.lines: List[str] = []
+        self.globals: Dict[str, Symbol] = {}
+        self.scopes: Dict[str, Dict[str, Symbol]] = {}
+        self.functions: Dict[str, ast.FuncDecl] = {}
+        self.current: Optional[ast.FuncDecl] = None
+        self.label_id = 0
+        self.break_stack: List[str] = []
+        self.continue_stack: List[str] = []
+        self.called: Set[str] = set()
+        self.strings: List[Tuple[str, List[int]]] = []
+        self.rodata: List[str] = []
+        self.global_inits: List[str] = []
+        self.ram_decls: List[str] = []
+
+    # ------------------------------------------------------------------
+    # Errors
+    # ------------------------------------------------------------------
+
+    def err(self, code: str, message: str, node: object = None, hint: str = "") -> CompileError:
+        return CompileError(
+            code,
+            message,
+            getattr(node, "line", 0) or 0,
+            getattr(node, "col", 0) or 0,
+            hint,
+            self.file,
+        )
+
+    def emit(self, *lines: str) -> None:
+        self.lines.extend(lines)
+
+    def new_label(self, base: str) -> str:
+        self.label_id += 1
+        return f"__L{self.label_id}_{base}"
+
+    # ------------------------------------------------------------------
+    # Naming
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def global_label(name: str) -> str:
+        return f"_g_{name}"
+
+    @staticmethod
+    def rom_label(name: str) -> str:
+        return f"_r_{name}"
+
+    @staticmethod
+    def local_label(fn: str, name: str) -> str:
+        return f"_l_{fn}_{name}"
+
+    @staticmethod
+    def param_label(fn: str, name: str) -> str:
+        return f"_p_{fn}_{name}"
+
+    @staticmethod
+    def builtin_arg(fn: str, name: str) -> str:
+        return f"__a_{fn}_{name}"
+
+    @staticmethod
+    def func_label(name: str) -> str:
+        return f"_f_{name}"
+
+    # ------------------------------------------------------------------
+    # Entry point
+    # ------------------------------------------------------------------
+
+    def generate(self) -> Tuple[str, Dict[str, object]]:
+        self.collect_symbols()
+        self.scan_calls()
+        modules = modules_for_calls(self.called)
+        if self.needs_font():
+            modules.add("font")
+            modules.add("vram")
+        self.modules = modules
+        runtime = Runtime(modules, self.assets)
+
+        body: List[str] = []
+        for fn in self.program.functions:
+            if fn.body is None:
+                continue
+            body.extend(self.gen_function(fn))
+
+        out: List[str] = ["; generated by FAMI-C -- do not edit"]
+        # Publish compile-time facts into the symbol table so `famic screen`
+        # can turn font tiles back into readable letters.
+        out.append(f".set __font_base {self.assets.font_base}")
+        out.append(f".set __tiles_used {self.assets.tiles_used}")
+        out.extend(runtime.ram_declarations())
+        out.extend(self.ram_declarations(modules))
+        out.append("")
+        out.append(".org $8000")
+        out.extend(runtime.reset_code())
+        out.append("")
+        out.extend(self.global_init_routine())
+        out.append("")
+        out.extend(body)
+        out.extend(runtime.routines())
+        out.extend(runtime.nmi_code())
+        out.append("")
+        out.extend(self.rodata)
+        out.extend(runtime.data_tables())
+        out.append("")
+        out.append(".org $FFFA")
+        out.append(".word _nmi")
+        out.append(".word _reset")
+        out.append(".word _irq")
+
+        info = {
+            "modules": sorted(modules),
+            "tiles_used": self.assets.tiles_used,
+            "called_builtins": sorted(self.called & set(BY_NAME)),
+        }
+        return "\n".join(out) + "\n", info
+
+    # ------------------------------------------------------------------
+    # Symbol collection
+    # ------------------------------------------------------------------
+
+    def collect_symbols(self) -> None:
+        for name in self.assets.constants:
+            if name in self.program.enums:
+                raise self.err("E0302", f"{name} 이(가) asset 과 enum 양쪽에 있습니다")
+
+        for fn in self.program.functions:
+            if fn.name in BY_NAME:
+                raise self.err(
+                    "E0302",
+                    f"{fn.name} 은(는) 런타임 내장 함수 이름입니다",
+                    fn,
+                    hint="다른 이름을 쓰세요. 내장 함수 목록은 `famic api` 로 볼 수 있습니다.",
+                )
+            if fn.name in self.functions and self.functions[fn.name].body and fn.body:
+                raise self.err("E0302", f"함수 {fn.name} 이(가) 두 번 정의되었습니다", fn)
+            if fn.name not in self.functions or fn.body is not None:
+                self.functions[fn.name] = fn
+
+        if "main" not in self.functions or self.functions["main"].body is None:
+            raise self.err(
+                "E0304",
+                "main 함수가 없습니다",
+                hint="`void main(void) { ... }` 를 정의하세요. 여기서 실행이 시작됩니다.",
+            )
+
+        for decl in self.program.globals:
+            if decl.is_extern and decl.init is None:
+                continue
+            self.declare_global(decl)
+
+        for fn in self.program.functions:
+            scope: Dict[str, Symbol] = {}
+            for p in fn.params:
+                if not isinstance(p.type, Scalar) or p.type.is_void:
+                    raise self.err("E0402", f"{fn.name}: 매개변수 타입이 잘못되었습니다", p)
+                scope[p.name] = Symbol(
+                    p.name, self.param_label(fn.name, p.name), p.type
+                )
+            if fn.body is not None:
+                for decl in self.collect_locals(fn.body):
+                    if decl.name in scope:
+                        raise self.err(
+                            "E0302",
+                            f"{fn.name} 안에서 {decl.name} 이(가) 두 번 선언되었습니다",
+                            decl,
+                        )
+                    scope[decl.name] = self.make_local_symbol(fn.name, decl)
+            self.scopes[fn.name] = scope
+
+    def declare_global(self, decl: ast.VarDecl) -> None:
+        if decl.name in self.globals:
+            raise self.err("E0302", f"전역 {decl.name} 이(가) 두 번 선언되었습니다", decl)
+        if decl.name in self.assets.constants:
+            raise self.err(
+                "E0302",
+                f"{decl.name} 은(는) 이미 asset 이름입니다",
+                decl,
+                hint="asset 이름과 변수 이름을 다르게 지으세요.",
+            )
+        base = decl.type
+        dims = list(decl.dims)
+        if isinstance(base, StructType):
+            sym = Symbol(decl.name, "", base, dims, decl.is_const, True)
+            for member in base.members:
+                label = f"{self.global_label(decl.name)}__{member.name}"
+                sym.members[member.name] = label
+                size = member.type.size * max(1, member.count) * max(1, sym.count)
+                self.ram_decls.append(f".ram {label} {size}")
+                if member.type.size == 2:
+                    self.ram_decls.append(f".ram {label}__hi {size // 2}")
+            if decl.is_const:
+                raise self.err(
+                    "E0312",
+                    f"{decl.name}: const 구조체는 지원하지 않습니다",
+                    decl,
+                    hint="const 데이터는 `const u8 이름[] = {...};` 배열로 두세요.",
+                )
+            if decl.init is not None:
+                raise self.err(
+                    "E0205",
+                    f"{decl.name}: 구조체 초기값은 지원하지 않습니다",
+                    decl,
+                    hint="main() 안에서 멤버마다 대입하세요.",
+                )
+            self.globals[decl.name] = sym
+            return
+
+        if not isinstance(base, Scalar) or base.is_void:
+            raise self.err("E0402", f"{decl.name}: 쓸 수 없는 타입입니다", decl)
+
+        if decl.is_const:
+            label = self.rom_label(decl.name)
+            sym = Symbol(decl.name, label, base, dims, True, True)
+            self.globals[decl.name] = sym
+            self.emit_rom_data(decl, sym)
+            return
+
+        label = self.global_label(decl.name)
+        sym = Symbol(decl.name, label, base, dims, False, True)
+        self.globals[decl.name] = sym
+        count = sym.count
+        if dims:
+            self.ram_decls.append(f".ram {label} {count}")
+            if base.size == 2:
+                self.ram_decls.append(f".ram {label}__hi {count}")
+        else:
+            self.ram_decls.append(f".ram {label} {base.size}")
+        if decl.init is not None:
+            self.queue_global_init(decl, sym)
+
+    def make_local_symbol(self, fn: str, decl: ast.VarDecl) -> Symbol:
+        base = decl.type
+        dims = list(decl.dims)
+        if isinstance(base, StructType):
+            sym = Symbol(decl.name, "", base, dims, decl.is_const, False)
+            for member in base.members:
+                label = f"{self.local_label(fn, decl.name)}__{member.name}"
+                sym.members[member.name] = label
+                size = member.type.size * max(1, member.count) * max(1, sym.count)
+                self.ram_decls.append(f".ram {label} {size}")
+                if member.type.size == 2:
+                    self.ram_decls.append(f".ram {label}__hi {size // 2}")
+            return sym
+        if not isinstance(base, Scalar) or base.is_void:
+            raise self.err("E0402", f"{decl.name}: 쓸 수 없는 타입입니다", decl)
+        label = self.local_label(fn, decl.name)
+        sym = Symbol(decl.name, label, base, dims, decl.is_const, False)
+        if dims:
+            if decl.init is not None:
+                raise self.err(
+                    "E0301",
+                    f"{decl.name}: 지역 배열에는 초기값을 줄 수 없습니다",
+                    decl,
+                    hint="`const u8 이름[] = {...};` 로 파일 맨 위(전역)에 두세요. ROM에 들어가 RAM을 쓰지 않습니다.",
+                )
+            self.ram_decls.append(f".ram {label} {sym.count}")
+            if base.size == 2:
+                self.ram_decls.append(f".ram {label}__hi {sym.count}")
+        else:
+            self.ram_decls.append(f".ram {label} {base.size}")
+        return sym
+
+    def collect_locals(self, stmt: Optional[ast.Stmt]) -> List[ast.VarDecl]:
+        out: List[ast.VarDecl] = []
+        if stmt is None:
+            return out
+        if isinstance(stmt, ast.VarStmt) and stmt.decl is not None:
+            out.append(stmt.decl)
+        elif isinstance(stmt, ast.Block):
+            for child in stmt.statements:
+                out.extend(self.collect_locals(child))
+        elif isinstance(stmt, ast.If):
+            out.extend(self.collect_locals(stmt.then_branch))
+            out.extend(self.collect_locals(stmt.else_branch))
+        elif isinstance(stmt, ast.While):
+            out.extend(self.collect_locals(stmt.body))
+        elif isinstance(stmt, ast.DoWhile):
+            out.extend(self.collect_locals(stmt.body))
+        elif isinstance(stmt, ast.For):
+            out.extend(self.collect_locals(stmt.init))
+            out.extend(self.collect_locals(stmt.body))
+        elif isinstance(stmt, ast.Switch):
+            for case in stmt.cases:
+                for child in case.body:
+                    out.extend(self.collect_locals(child))
+        return out
+
+    # ------------------------------------------------------------------
+    # Static data
+    # ------------------------------------------------------------------
+
+    def init_values(self, decl: ast.VarDecl, sym: Symbol) -> List[int]:
+        init = decl.init
+        count = sym.count if sym.is_array else 1
+        if isinstance(init, str):
+            values = [self.font_tile(ch, decl) for ch in init]
+        elif isinstance(init, list):
+            values = [self.const_value(v, decl) for v in self.flatten(init)]
+        elif init is None:
+            values = []
+        else:
+            values = [self.const_value(init, decl)]
+        if sym.is_array and len(values) > count:
+            raise self.err(
+                "E0205",
+                f"{decl.name}: 초기값이 {len(values)}개인데 배열 크기는 {count} 입니다",
+                decl,
+            )
+        values += [0] * (count - len(values))
+        return values
+
+    def const_value(self, value: object, node: object) -> int:
+        if isinstance(value, int):
+            return value
+        raise self.err("E0404", f"상수식이 필요합니다: {value!r}", node)
+
+    def flatten(self, value: object) -> List[object]:
+        out: List[object] = []
+        if isinstance(value, list):
+            for item in value:
+                out.extend(self.flatten(item))
+        elif isinstance(value, str):
+            out.extend(self.font_tile(ch, None) for ch in value)
+        else:
+            out.append(value)
+        return out
+
+    def font_tile(self, ch: str, node: object) -> int:
+        key = ch.upper()
+        if key not in self.assets.font_map:
+            raise self.err(
+                "E0602",
+                f"내장 폰트에 '{ch}' 글자가 없습니다",
+                node,
+                hint="쓸 수 있는 글자: A-Z 0-9 공백 . , : - ! ? + / ( ) * = < > % '",
+            )
+        return self.assets.font_map[key]
+
+    def emit_rom_data(self, decl: ast.VarDecl, sym: Symbol) -> None:
+        values = self.init_values(decl, sym)
+        self.rodata.append("")
+        if sym.type.size == 1:
+            self.rodata.append(f"{sym.label}:")
+            self.emit_byte_rows(values)
+        else:
+            self.rodata.append(f"{sym.label}:")
+            self.emit_byte_rows([v & 0xFF for v in values])
+            self.rodata.append(f"{sym.label}__hi:")
+            self.emit_byte_rows([(v >> 8) & 0xFF for v in values])
+
+    def emit_byte_rows(self, values: Sequence[int]) -> None:
+        values = list(values) or [0]
+        for i in range(0, len(values), 16):
+            chunk = values[i : i + 16]
+            self.rodata.append(".byte " + ", ".join(f"${v & 0xFF:02X}" for v in chunk))
+
+    def queue_global_init(self, decl: ast.VarDecl, sym: Symbol) -> None:
+        values = self.init_values(decl, sym)
+        if not sym.is_array:
+            self.global_inits.append(f"LDA #${values[0] & 0xFF:02X}")
+            self.global_inits.append(f"STA {sym.label}")
+            if sym.type.size == 2:
+                self.global_inits.append(f"LDA #${(values[0] >> 8) & 0xFF:02X}")
+                self.global_inits.append(f"STA {sym.label}+1")
+            return
+        template = f"__init_{decl.name}"
+        self.rodata.append("")
+        self.rodata.append(f"{template}:")
+        self.emit_byte_rows([v & 0xFF for v in values])
+        self.global_inits.extend(
+            [
+                "LDX #$00",
+                f"__gi_{decl.name}:",
+                f"LDA {template},X",
+                f"STA {sym.label},X",
+                "INX",
+                f"CPX #{len(values) & 0xFF if len(values) < 256 else 0}",
+                f"BNE __gi_{decl.name}",
+            ]
+        )
+        if sym.type.size == 2:
+            template_hi = f"{template}__hi"
+            self.rodata.append(f"{template_hi}:")
+            self.emit_byte_rows([(v >> 8) & 0xFF for v in values])
+            self.global_inits.extend(
+                [
+                    "LDX #$00",
+                    f"__gih_{decl.name}:",
+                    f"LDA {template_hi},X",
+                    f"STA {sym.label}__hi,X",
+                    "INX",
+                    f"CPX #{len(values) & 0xFF if len(values) < 256 else 0}",
+                    f"BNE __gih_{decl.name}",
+                ]
+            )
+
+    def global_init_routine(self) -> List[str]:
+        return ["__globals_init:"] + self.global_inits + ["RTS"]
+
+    # ------------------------------------------------------------------
+    # RAM declarations
+    # ------------------------------------------------------------------
+
+    def ram_declarations(self, modules: Set[str]) -> List[str]:
+        out = list(self.ram_decls)
+        for fn in self.program.functions:
+            if fn.body is None:
+                continue
+            for p in fn.params:
+                out.append(f".ram {self.param_label(fn.name, p.name)} {p.type.size}")
+        for name in emitted_builtins(modules):
+            builtin = BY_NAME[name]
+            for pname, ptype in builtin.params:
+                size = 2 if ptype is STR else ptype.size
+                out.append(f".ram {self.builtin_arg(name, pname)} {size}")
+            if name == "bg_text":
+                out.append(f".ram {self.builtin_arg(name, 'len')} 1")
+        return out
+
+    # ------------------------------------------------------------------
+    # Analysis
+    # ------------------------------------------------------------------
+
+    def scan_calls(self) -> None:
+        def walk(node: object) -> None:
+            if isinstance(node, ast.Call):
+                self.called.add(node.name)
+            for attr in vars(node).values() if hasattr(node, "__dict__") else []:
+                if isinstance(attr, (ast.Expr, ast.Stmt)):
+                    walk(attr)
+                elif isinstance(attr, list):
+                    for item in attr:
+                        if isinstance(item, (ast.Expr, ast.Stmt)):
+                            walk(item)
+                        elif isinstance(item, ast.SwitchCase):
+                            for s in item.body:
+                                walk(s)
+
+        for fn in self.program.functions:
+            if fn.body is not None:
+                walk(fn.body)
+
+    def needs_font(self) -> bool:
+        if "bg_text" in self.called or "bg_number" in self.called:
+            return True
+        for decl in self.program.globals:
+            if isinstance(decl.init, str):
+                return True
+            if isinstance(decl.init, list) and any(
+                isinstance(v, str) for v in self.raw_flatten(decl.init)
+            ):
+                return True
+        return False
+
+    def raw_flatten(self, value: object) -> List[object]:
+        out: List[object] = []
+        if isinstance(value, list):
+            for item in value:
+                out.extend(self.raw_flatten(item))
+        else:
+            out.append(value)
+        return out
+
+    # ------------------------------------------------------------------
+    # Functions
+    # ------------------------------------------------------------------
+
+    def gen_function(self, fn: ast.FuncDecl) -> List[str]:
+        self.lines = []
+        self.current = fn
+        self.emit("", f"{self.func_label(fn.name)}:")
+        if fn.name == "main":
+            self.emit("JSR __globals_init")
+        self.return_label = self.new_label(f"ret_{fn.name}")
+        self.gen_stmt(fn.body)
+        self.emit(f"{self.return_label}:", "RTS")
+        self.current = None
+        return self.lines
+
+    # ------------------------------------------------------------------
+    # Statements
+    # ------------------------------------------------------------------
+
+    def gen_stmt(self, stmt: Optional[ast.Stmt]) -> None:
+        if stmt is None:
+            return
+        if isinstance(stmt, ast.Block):
+            for child in stmt.statements:
+                self.gen_stmt(child)
+            return
+        if isinstance(stmt, ast.ExprStmt):
+            if stmt.expr is not None:
+                self.gen_expr(stmt.expr)
+            return
+        if isinstance(stmt, ast.VarStmt):
+            self.gen_local_init(stmt.decl)
+            return
+        if isinstance(stmt, ast.If):
+            self.gen_if(stmt)
+            return
+        if isinstance(stmt, ast.While):
+            self.gen_while(stmt)
+            return
+        if isinstance(stmt, ast.DoWhile):
+            self.gen_do_while(stmt)
+            return
+        if isinstance(stmt, ast.For):
+            self.gen_for(stmt)
+            return
+        if isinstance(stmt, ast.Switch):
+            self.gen_switch(stmt)
+            return
+        if isinstance(stmt, ast.Return):
+            if stmt.expr is not None:
+                self.gen_expr(stmt.expr)
+            self.emit(f"JMP {self.return_label}")
+            return
+        if isinstance(stmt, ast.Break):
+            if not self.break_stack:
+                raise self.err("E0203", "반복문 밖의 break", stmt)
+            self.emit(f"JMP {self.break_stack[-1]}")
+            return
+        if isinstance(stmt, ast.Continue):
+            if not self.continue_stack:
+                raise self.err("E0203", "반복문 밖의 continue", stmt)
+            self.emit(f"JMP {self.continue_stack[-1]}")
+            return
+        raise self.err("E0203", f"지원하지 않는 문장 {type(stmt).__name__}", stmt)
+
+    def gen_local_init(self, decl: Optional[ast.VarDecl]) -> None:
+        if decl is None or decl.init is None:
+            return
+        sym = self.lookup(decl.name, decl)
+        if sym.is_array or isinstance(sym.type, StructType):
+            return
+        if isinstance(decl.init, list):
+            raise self.err(
+                "E0205",
+                f"{decl.name}: 스칼라 변수에 중괄호 초기값을 줄 수 없습니다",
+                decl,
+            )
+        value = decl.init
+        if isinstance(value, int):
+            self.emit(f"LDA #${value & 0xFF:02X}", f"STA {sym.label}")
+            if sym.type.size == 2:
+                self.emit(f"LDA #${(value >> 8) & 0xFF:02X}", f"STA {sym.label}+1")
+            return
+        raise self.err("E0404", f"{decl.name}: 초기값이 상수가 아닙니다", decl)
+
+    def gen_if(self, stmt: ast.If) -> None:
+        else_label = self.new_label("else")
+        end_label = self.new_label("endif")
+        self.gen_condition(stmt.cond, else_label)
+        self.gen_stmt(stmt.then_branch)
+        if stmt.else_branch is not None:
+            self.emit(f"JMP {end_label}")
+            self.emit(f"{else_label}:")
+            self.gen_stmt(stmt.else_branch)
+            self.emit(f"{end_label}:")
+        else:
+            self.emit(f"{else_label}:")
+
+    def gen_while(self, stmt: ast.While) -> None:
+        top = self.new_label("while")
+        end = self.new_label("wend")
+        self.emit(f"{top}:")
+        self.gen_condition(stmt.cond, end)
+        self.break_stack.append(end)
+        self.continue_stack.append(top)
+        self.gen_stmt(stmt.body)
+        self.break_stack.pop()
+        self.continue_stack.pop()
+        self.emit(f"JMP {top}", f"{end}:")
+
+    def gen_do_while(self, stmt: ast.DoWhile) -> None:
+        top = self.new_label("do")
+        cont = self.new_label("docond")
+        end = self.new_label("dend")
+        self.emit(f"{top}:")
+        self.break_stack.append(end)
+        self.continue_stack.append(cont)
+        self.gen_stmt(stmt.body)
+        self.break_stack.pop()
+        self.continue_stack.pop()
+        self.emit(f"{cont}:")
+        self.gen_condition(stmt.cond, end)
+        self.emit(f"JMP {top}", f"{end}:")
+
+    def gen_for(self, stmt: ast.For) -> None:
+        top = self.new_label("for")
+        cont = self.new_label("fnext")
+        end = self.new_label("fend")
+        self.gen_stmt(stmt.init)
+        self.emit(f"{top}:")
+        if stmt.cond is not None:
+            self.gen_condition(stmt.cond, end)
+        self.break_stack.append(end)
+        self.continue_stack.append(cont)
+        self.gen_stmt(stmt.body)
+        self.break_stack.pop()
+        self.continue_stack.pop()
+        self.emit(f"{cont}:")
+        if stmt.post is not None:
+            self.gen_expr(stmt.post)
+        self.emit(f"JMP {top}", f"{end}:")
+
+    def gen_switch(self, stmt: ast.Switch) -> None:
+        value_type = self.gen_expr(stmt.value)
+        temp = "__t4"
+        self.emit(f"STA {temp}")
+        if value_type.size == 2:
+            self.emit("LDA __ah", "STA __t5")
+        end = self.new_label("swend")
+        labels = [self.new_label(f"case{i}") for i in range(len(stmt.cases))]
+        default_label = end
+        for case, label in zip(stmt.cases, labels):
+            if case.value is None:
+                default_label = label
+                continue
+            skip = self.new_label("swskip")
+            self.emit(f"LDA {temp}", f"CMP #${case.value & 0xFF:02X}")
+            if value_type.size == 2:
+                self.emit(f"BNE {skip}")
+                self.emit("LDA __t5", f"CMP #${(case.value >> 8) & 0xFF:02X}")
+            self.emit(f"BNE {skip}", f"JMP {label}", f"{skip}:")
+        self.emit(f"JMP {default_label}")
+        self.break_stack.append(end)
+        for case, label in zip(stmt.cases, labels):
+            self.emit(f"{label}:")
+            for child in case.body:
+                self.gen_stmt(child)
+        self.break_stack.pop()
+        self.emit(f"{end}:")
+
+    def gen_condition(self, cond: Optional[ast.Expr], false_label: str) -> None:
+        """Jump to false_label when cond is zero."""
+
+        if cond is None:
+            return
+        # `a && b` and `a || b` fall out of the generic path correctly, but
+        # comparisons are the common case and deserve a direct branch.
+        t = self.gen_expr(cond)
+        if t.size == 2:
+            self.emit("ORA __ah")
+        self.emit("CMP #$00")
+        skip = self.new_label("cskip")
+        self.emit(f"BNE {skip}", f"JMP {false_label}", f"{skip}:")
+
+    # ------------------------------------------------------------------
+    # Expressions
+    # ------------------------------------------------------------------
+
+    def gen_expr(self, expr: ast.Expr) -> Scalar:
+        if isinstance(expr, ast.Num):
+            value = expr.value
+            if 0 <= value <= 255:
+                self.emit(f"LDA #${value & 0xFF:02X}")
+                return U8
+            if -128 <= value < 0:
+                self.emit(f"LDA #${value & 0xFF:02X}")
+                return I8
+            self.emit(
+                f"LDA #${(value >> 8) & 0xFF:02X}",
+                "STA __ah",
+                f"LDA #${value & 0xFF:02X}",
+            )
+            return I16 if value < 0 else U16
+        if isinstance(expr, ast.StrLit):
+            raise self.err(
+                "E0402",
+                "문자열은 bg_text() 인자나 const 배열 초기값으로만 쓸 수 있습니다",
+                expr,
+                hint='예: bg_text(2, 3, "SCORE");   또는   const u8 msg[] = "HI";',
+            )
+        if isinstance(expr, ast.Var):
+            return self.gen_load(self.resolve_lvalue(expr))
+        if isinstance(expr, (ast.Index, ast.Field)):
+            return self.gen_load(self.resolve_lvalue(expr))
+        if isinstance(expr, ast.Call):
+            return self.gen_call(expr)
+        if isinstance(expr, ast.Unary):
+            return self.gen_unary(expr)
+        if isinstance(expr, ast.PostIncDec):
+            return self.gen_post(expr)
+        if isinstance(expr, ast.Binary):
+            return self.gen_binary(expr)
+        if isinstance(expr, ast.Assign):
+            return self.gen_assign(expr)
+        if isinstance(expr, ast.Cast):
+            source = self.gen_expr(expr.expr)
+            return self.coerce(source, expr.to)
+        if isinstance(expr, ast.Ternary):
+            return self.gen_ternary(expr)
+        if isinstance(expr, ast.SizeOf):
+            return self.gen_sizeof(expr)
+        raise self.err("E0203", f"지원하지 않는 식 {type(expr).__name__}", expr)
+
+    def gen_sizeof(self, expr: ast.SizeOf) -> Scalar:
+        target = expr.target
+        if isinstance(target, ast.Var):
+            sym = self.lookup(target.name, expr, soft=True)
+            if sym is not None:
+                size = (sym.count if sym.is_array else 1) * (
+                    sym.type.size if isinstance(sym.type, Scalar) else sym.type.size
+                )
+                self.emit(f"LDA #${size & 0xFF:02X}")
+                if size > 255:
+                    self.emit(f"LDA #${(size >> 8) & 0xFF:02X}", "STA __ah")
+                    self.emit(f"LDA #${size & 0xFF:02X}")
+                    return U16
+                return U8
+        t = self.gen_expr(target) if isinstance(target, ast.Expr) else U8
+        self.emit(f"LDA #${t.size:02X}")
+        return U8
+
+    # -- lvalues -----------------------------------------------------------
+
+    def lookup(self, name: str, node: object, soft: bool = False) -> Optional[Symbol]:
+        if self.current is not None:
+            scope = self.scopes.get(self.current.name, {})
+            if name in scope:
+                return scope[name]
+        if name in self.globals:
+            return self.globals[name]
+        if soft:
+            return None
+        raise self.err(
+            "E0303",
+            f"'{name}' 을(를) 찾을 수 없습니다",
+            node,
+            hint="선언했는지, 철자가 맞는지 확인하세요. 내장 상수 목록은 `famic api` 로 볼 수 있습니다.",
+        )
+
+    def constant_of(self, name: str) -> Optional[int]:
+        if name in self.assets.constants:
+            return self.assets.constants[name]
+        if name in self.program.enums:
+            return self.program.enums[name]
+        for const_name, value, _, _ in CONSTANTS:
+            if const_name == name:
+                return value
+        return None
+
+    def resolve_lvalue(self, expr: ast.Expr) -> LValue:
+        if isinstance(expr, ast.Var):
+            const = self.constant_of(expr.name)
+            if const is not None and self.lookup(expr.name, expr, soft=True) is None:
+                return LValue("", "", U8, index=ast.Num(value=const), is_const=True)
+            sym = self.lookup(expr.name, expr)
+            if isinstance(sym.type, StructType):
+                raise self.err(
+                    "E0402",
+                    f"{expr.name} 은(는) 구조체입니다",
+                    expr,
+                    hint=f"멤버를 붙이세요. 예: {expr.name}.{sym.type.members[0].name if sym.type.members else 'x'}",
+                )
+            if sym.is_array:
+                raise self.err(
+                    "E0402",
+                    f"{expr.name} 은(는) 배열입니다",
+                    expr,
+                    hint=f"첨자를 붙이세요. 예: {expr.name}[0]",
+                )
+            return LValue(sym.label, f"{sym.label}+1", sym.type, None, sym.is_const)
+
+        if isinstance(expr, ast.Field):
+            base = expr.base
+            index: Optional[ast.Expr] = None
+            if isinstance(base, ast.Index):
+                index = base.index
+                base = base.base
+            if not isinstance(base, ast.Var):
+                raise self.err("E0311", "구조체 접근이 너무 복잡합니다", expr)
+            sym = self.lookup(base.name, expr)
+            if not isinstance(sym.type, StructType):
+                raise self.err(
+                    "E0311", f"{base.name} 은(는) 구조체가 아닙니다", expr
+                )
+            member = sym.type.member(expr.name)
+            if member is None:
+                names = ", ".join(m.name for m in sym.type.members)
+                raise self.err(
+                    "E0311",
+                    f"{sym.type.name} 에 멤버 '{expr.name}' 이(가) 없습니다",
+                    expr,
+                    hint=f"있는 멤버: {names}",
+                )
+            label = sym.members[member.name]
+            if sym.is_array and index is None:
+                raise self.err(
+                    "E0402",
+                    f"{base.name} 은(는) 배열입니다",
+                    expr,
+                    hint=f"예: {base.name}[i].{expr.name}",
+                )
+            return LValue(label, f"{label}__hi", member.type, index, sym.is_const)
+
+        if isinstance(expr, ast.Index):
+            base = expr.base
+            indices = [expr.index]
+            while isinstance(base, ast.Index):
+                indices.insert(0, base.index)
+                base = base.base
+            if isinstance(base, ast.Field):
+                lv = self.resolve_lvalue(base)
+                return LValue(lv.label, lv.label_hi, lv.type, indices[-1], lv.is_const)
+            if not isinstance(base, ast.Var):
+                raise self.err("E0306", "배열 접근이 너무 복잡합니다", expr)
+            sym = self.lookup(base.name, expr)
+            if not sym.is_array:
+                raise self.err(
+                    "E0306",
+                    f"{base.name} 은(는) 배열이 아닙니다",
+                    expr,
+                    hint="배열로 선언했는지 확인하세요. 예: `u8 board[200];`",
+                )
+            if len(indices) > len(sym.dims):
+                raise self.err(
+                    "E0306",
+                    f"{base.name} 은(는) {len(sym.dims)}차원인데 첨자를 {len(indices)}개 썼습니다",
+                    expr,
+                )
+            index = self.linearize(indices, sym.dims, expr)
+            if isinstance(sym.type, StructType):
+                raise self.err(
+                    "E0402",
+                    f"{base.name}[...] 는 구조체입니다",
+                    expr,
+                    hint=f"멤버를 붙이세요. 예: {base.name}[i].{sym.type.members[0].name if sym.type.members else 'x'}",
+                )
+            return LValue(sym.label, f"{sym.label}__hi", sym.type, index, sym.is_const)
+
+        raise self.err("E0407", "대입할 수 없는 식입니다", expr)
+
+    def linearize(
+        self, indices: List[ast.Expr], dims: List[int], node: object
+    ) -> ast.Expr:
+        """Fold `a[y][x]` into a single index expression `y*W + x`."""
+
+        if len(indices) == 1:
+            return indices[0]
+        expr = indices[0]
+        for depth in range(1, len(indices)):
+            stride = 1
+            for d in dims[depth:]:
+                stride *= d
+            expr = ast.Binary(
+                line=getattr(node, "line", 0),
+                col=getattr(node, "col", 0),
+                op="+",
+                left=ast.Binary(
+                    line=getattr(node, "line", 0),
+                    col=getattr(node, "col", 0),
+                    op="*",
+                    left=expr,
+                    right=ast.Num(value=stride),
+                ),
+                right=indices[depth],
+            )
+            # Collapse the stride back to 1 for the next round.
+            dims = [1] + dims[depth + 1 :]
+        return expr
+
+    def gen_load(self, lv: LValue) -> Scalar:
+        if lv.is_const and not lv.label:
+            assert isinstance(lv.index, ast.Num)
+            value = lv.index.value
+            self.emit(f"LDA #${value & 0xFF:02X}")
+            return U8
+        if lv.index is None:
+            self.emit(f"LDA {lv.label}")
+            if lv.type.size == 2:
+                self.emit("STA __t0", f"LDA {lv.label_hi}", "STA __ah", "LDA __t0")
+            return lv.type
+        self.gen_index(lv.index)
+        self.emit(f"LDA {lv.label},X")
+        if lv.type.size == 2:
+            self.emit("STA __t0", f"LDA {lv.label_hi},X", "STA __ah", "LDA __t0")
+        return lv.type
+
+    def gen_index(self, index: ast.Expr) -> None:
+        """Evaluate an array index into X."""
+
+        t = self.gen_expr(index)
+        self.emit("TAX")
+
+    def gen_store(self, lv: LValue, value_type: Scalar) -> None:
+        """Store the value currently in A (+ __ah) into lv."""
+
+        if lv.is_const:
+            raise self.err("E0305", "const 값은 바꿀 수 없습니다", None)
+        if lv.index is None:
+            self.emit(f"STA {lv.label}")
+            if lv.type.size == 2:
+                self.emit("LDA __ah", f"STA {lv.label_hi}", f"LDA {lv.label}")
+            return
+        # The index has to be evaluated after the value, so park the value.
+        self.emit("STA __rl")
+        if lv.type.size == 2:
+            self.emit("LDA __ah", "STA __rh")
+        self.gen_index(lv.index)
+        self.emit("LDA __rl", f"STA {lv.label},X")
+        if lv.type.size == 2:
+            self.emit("LDA __rh", f"STA {lv.label_hi},X", "STA __ah", "LDA __rl")
+
+    # -- coercion ----------------------------------------------------------
+
+    def coerce(self, source: Scalar, target: Scalar) -> Scalar:
+        if source.size == target.size:
+            return target
+        if target.size == 2:
+            if source.signed:
+                # Sign extension: replicate bit 7 across the high byte.
+                skip = self.new_label("sext")
+                self.emit(
+                    "LDX #$00",
+                    "CMP #$80",
+                    f"BCC {skip}",
+                    "LDX #$FF",
+                    f"{skip}:",
+                    "STX __ah",
+                )
+            else:
+                self.emit("LDX #$00", "STX __ah")
+            return target
+        # Narrowing keeps the low byte, which is already in A.
+        return target
+
+    def to16(self, t: Scalar) -> Scalar:
+        return self.coerce(t, I16 if t.signed else U16)
+
+    # -- operators ---------------------------------------------------------
+
+    def gen_unary(self, expr: ast.Unary) -> Scalar:
+        t = self.gen_expr(expr.expr)
+        if expr.op == "+":
+            return t
+        if expr.op == "-":
+            if t.size == 1:
+                self.emit("EOR #$FF", "CLC", "ADC #$01")
+                return I8
+            self.emit(
+                "EOR #$FF",
+                "STA __t0",
+                "LDA __ah",
+                "EOR #$FF",
+                "STA __ah",
+                "LDA __t0",
+                "CLC",
+                "ADC #$01",
+                "STA __t0",
+                "LDA __ah",
+                "ADC #$00",
+                "STA __ah",
+                "LDA __t0",
+            )
+            return I16
+        if expr.op == "~":
+            self.emit("EOR #$FF")
+            if t.size == 2:
+                self.emit("STA __t0", "LDA __ah", "EOR #$FF", "STA __ah", "LDA __t0")
+            return t
+        if expr.op == "!":
+            if t.size == 2:
+                self.emit("ORA __ah")
+            true_label = self.new_label("not_true")
+            end_label = self.new_label("not_end")
+            self.emit(
+                "CMP #$00",
+                f"BEQ {true_label}",
+                "LDA #$00",
+                f"JMP {end_label}",
+                f"{true_label}:",
+                "LDA #$01",
+                f"{end_label}:",
+            )
+            return U8
+        raise self.err("E0401", f"지원하지 않는 단항 연산자 {expr.op}", expr)
+
+    def gen_post(self, expr: ast.PostIncDec) -> Scalar:
+        lv = self.resolve_lvalue(expr.target)
+        t = self.gen_load(lv)
+        if t.size == 1:
+            self.emit("STA __t3")
+        else:
+            self.emit("STA __t3", "LDA __ah", "STA __t4", "LDA __t3")
+        delta = ast.Num(value=1)
+        self.gen_assign(
+            ast.Assign(
+                line=expr.line,
+                col=expr.col,
+                op="+=" if expr.op == "++" else "-=",
+                target=expr.target,
+                value=delta,
+            )
+        )
+        self.emit("LDA __t3")
+        if t.size == 2:
+            self.emit("LDA __t4", "STA __ah", "LDA __t3")
+        return t
+
+    def gen_ternary(self, expr: ast.Ternary) -> Scalar:
+        else_label = self.new_label("tern_else")
+        end_label = self.new_label("tern_end")
+        self.gen_condition(expr.cond, else_label)
+        then_type = self.gen_expr(expr.then_expr)
+        self.emit(f"JMP {end_label}", f"{else_label}:")
+        else_type = self.gen_expr(expr.else_expr)
+        self.emit(f"{end_label}:")
+        return promote(then_type, else_type)
+
+    def gen_binary(self, expr: ast.Binary) -> Scalar:
+        if expr.op == "&&":
+            return self.gen_logical(expr, is_and=True)
+        if expr.op == "||":
+            return self.gen_logical(expr, is_and=False)
+
+        left_type = self.static_type(expr.left)
+        right_type = self.static_type(expr.right)
+        result = promote(left_type, right_type)
+        if expr.op in ("<<", ">>"):
+            result = left_type
+
+        if result.size == 1:
+            return self.gen_binary8(expr, result)
+        return self.gen_binary16(expr, result)
+
+    def gen_binary8(self, expr: ast.Binary, result: Scalar) -> Scalar:
+        self.gen_expr(expr.left)
+        self.emit("PHA")
+        self.gen_expr(expr.right)
+        self.emit("STA __t0", "PLA")
+        op = expr.op
+        if op == "+":
+            self.emit("CLC", "ADC __t0")
+            return result
+        if op == "-":
+            self.emit("SEC", "SBC __t0")
+            return result
+        if op == "*":
+            self.emit("JSR __mul8")
+            return result
+        if op == "/":
+            self.emit("STA __t1", "JSR __divmod8")
+            return result
+        if op == "%":
+            self.emit("STA __t1", "JSR __divmod8", "LDA __t2")
+            return result
+        if op == "&":
+            self.emit("AND __t0")
+            return result
+        if op == "|":
+            self.emit("ORA __t0")
+            return result
+        if op == "^":
+            self.emit("EOR __t0")
+            return result
+        if op in ("<<", ">>"):
+            loop = self.new_label("shift")
+            done = self.new_label("shend")
+            self.emit("LDX __t0", f"BEQ {done}", f"{loop}:")
+            if op == "<<":
+                self.emit("ASL A")
+            elif result.signed:
+                # Arithmetic shift right: feed bit 7 back in through the carry.
+                self.emit("CMP #$80", "ROR A")
+            else:
+                self.emit("LSR A")
+            self.emit("DEX", f"BNE {loop}", f"{done}:")
+            return result
+        if op in ("==", "!=", "<", "<=", ">", ">="):
+            return self.gen_compare8(op, result.signed)
+        raise self.err("E0401", f"지원하지 않는 연산자 {op}", expr)
+
+    def gen_compare8(self, op: str, signed: bool) -> Scalar:
+        true_label = self.new_label("cmp_true")
+        false_label = self.new_label("cmp_false")
+        end_label = self.new_label("cmp_end")
+        if signed:
+            # Bias both sides by 128 so an unsigned compare orders them right.
+            self.emit("CLC", "ADC #$80", "STA __t1", "LDA __t0", "CLC", "ADC #$80")
+            self.emit("STA __t0", "LDA __t1")
+        self.emit("CMP __t0")
+        if op == "==":
+            self.emit(f"BEQ {true_label}", f"JMP {false_label}")
+        elif op == "!=":
+            self.emit(f"BNE {true_label}", f"JMP {false_label}")
+        elif op == "<":
+            self.emit(f"BCC {true_label}", f"JMP {false_label}")
+        elif op == "<=":
+            self.emit(f"BCC {true_label}", f"BEQ {true_label}", f"JMP {false_label}")
+        elif op == ">":
+            self.emit(f"BEQ {false_label}", f"BCC {false_label}", f"JMP {true_label}")
+        elif op == ">=":
+            self.emit(f"BCS {true_label}", f"JMP {false_label}")
+        self.emit(
+            f"{true_label}:",
+            "LDA #$01",
+            f"JMP {end_label}",
+            f"{false_label}:",
+            "LDA #$00",
+            f"{end_label}:",
+        )
+        return U8
+
+    def gen_binary16(self, expr: ast.Binary, result: Scalar) -> Scalar:
+        # left -> stack, right -> __rl/__rh, left back into A/__ah
+        left_type = self.gen_expr(expr.left)
+        self.to16(left_type)
+        self.emit("PHA", "LDA __ah", "PHA")
+        right_type = self.gen_expr(expr.right)
+        self.to16(right_type)
+        self.emit("STA __rl", "LDA __ah", "STA __rh")
+        self.emit("PLA", "STA __ah", "PLA")
+
+        op = expr.op
+        if op == "+":
+            self.emit(
+                "CLC", "ADC __rl", "STA __t0",
+                "LDA __ah", "ADC __rh", "STA __ah", "LDA __t0",
+            )
+            return result
+        if op == "-":
+            self.emit(
+                "SEC", "SBC __rl", "STA __t0",
+                "LDA __ah", "SBC __rh", "STA __ah", "LDA __t0",
+            )
+            return result
+        if op == "*":
+            self.emit("JSR __mul16x16")
+            return result
+        if op == "/":
+            self.emit("JSR __div16")
+            return result
+        if op == "%":
+            self.emit("JSR __div16", "LDA __t2", "STA __t0", "LDA __t3", "STA __ah", "LDA __t0")
+            return result
+        if op in ("&", "|", "^"):
+            mn = {"&": "AND", "|": "ORA", "^": "EOR"}[op]
+            self.emit(
+                f"{mn} __rl", "STA __t0",
+                "LDA __ah", f"{mn} __rh", "STA __ah", "LDA __t0",
+            )
+            return result
+        if op in ("<<", ">>"):
+            loop = self.new_label("shift16")
+            done = self.new_label("shend16")
+            self.emit("LDX __rl", f"BEQ {done}", f"{loop}:")
+            if op == "<<":
+                self.emit("ASL A", "ROL __ah")
+            else:
+                self.emit("LSR __ah", "ROR A")
+            self.emit("DEX", f"BNE {loop}", f"{done}:")
+            return result
+        if op in ("==", "!=", "<", "<=", ">", ">="):
+            return self.gen_compare16(op)
+        raise self.err("E0401", f"지원하지 않는 연산자 {op}", expr)
+
+    def gen_compare16(self, op: str) -> Scalar:
+        """Compare A/__ah against __rl/__rh, leaving 0 or 1 in A."""
+
+        true_label = self.new_label("c16_true")
+        false_label = self.new_label("c16_false")
+        end_label = self.new_label("c16_end")
+        self.emit("STA __t0")  # keep the left low byte; SBC destroys A
+        if op in ("==", "!="):
+            self.emit("CMP __rl", f"BNE {false_label if op == '==' else true_label}")
+            self.emit("LDA __ah", "CMP __rh")
+            if op == "==":
+                self.emit(f"BEQ {true_label}", f"JMP {false_label}")
+            else:
+                self.emit(f"BNE {true_label}", f"JMP {false_label}")
+        else:
+            # a < b and a >= b read the carry of a - b; a > b and a <= b are
+            # the same test with the operands swapped.
+            if op in ("<", ">="):
+                self.emit("LDA __t0", "SEC", "SBC __rl", "LDA __ah", "SBC __rh")
+                branch = "BCC" if op == "<" else "BCS"
+            else:
+                self.emit("LDA __rl", "SEC", "SBC __t0", "LDA __rh", "SBC __ah")
+                branch = "BCC" if op == ">" else "BCS"
+            self.emit(f"{branch} {true_label}", f"JMP {false_label}")
+        self.emit(
+            f"{true_label}:",
+            "LDA #$01",
+            f"JMP {end_label}",
+            f"{false_label}:",
+            "LDA #$00",
+            f"{end_label}:",
+        )
+        return U8
+
+    def gen_logical(self, expr: ast.Binary, is_and: bool) -> Scalar:
+        short = self.new_label("lg_short")
+        end = self.new_label("lg_end")
+        t = self.gen_expr(expr.left)
+        if t.size == 2:
+            self.emit("ORA __ah")
+        self.emit("CMP #$00", f"{'BEQ' if is_and else 'BNE'} {short}")
+        t = self.gen_expr(expr.right)
+        if t.size == 2:
+            self.emit("ORA __ah")
+        self.emit("CMP #$00", f"{'BEQ' if is_and else 'BNE'} {short}")
+        self.emit(
+            "LDA #$01" if is_and else "LDA #$00",
+            f"JMP {end}",
+            f"{short}:",
+            "LDA #$00" if is_and else "LDA #$01",
+            f"{end}:",
+        )
+        return U8
+
+    # -- assignment --------------------------------------------------------
+
+    def gen_assign(self, expr: ast.Assign) -> Scalar:
+        lv = self.resolve_lvalue(expr.target)
+        if lv.is_const:
+            raise self.err(
+                "E0305",
+                "const 값에는 대입할 수 없습니다",
+                expr,
+                hint="const 배열/상수는 ROM에 있습니다. 바꾸려면 const 를 빼고 전역 변수로 두세요.",
+            )
+        if expr.op == "=":
+            value_type = self.gen_expr(expr.value)
+            self.coerce(value_type, lv.type)
+            self.gen_store(lv, lv.type)
+            return lv.type
+        binop = expr.op[:-1]
+        combined = ast.Binary(
+            line=expr.line, col=expr.col, op=binop, left=expr.target, right=expr.value
+        )
+        value_type = self.gen_expr(combined)
+        self.coerce(value_type, lv.type)
+        self.gen_store(lv, lv.type)
+        return lv.type
+
+    # -- calls -------------------------------------------------------------
+
+    def gen_call(self, call: ast.Call) -> Scalar:
+        if call.name in BY_NAME:
+            return self.gen_builtin_call(call)
+        fn = self.functions.get(call.name)
+        if fn is None:
+            close = self.suggest(call.name)
+            raise self.err(
+                "E0308",
+                f"'{call.name}' 함수를 찾을 수 없습니다",
+                call,
+                hint=(f"'{close}' 를 쓰려던 건가요? " if close else "")
+                + "내장 함수 목록은 `python famic.py api` 로 볼 수 있습니다.",
+            )
+        if len(call.args) != len(fn.params):
+            raise self.err(
+                "E0307",
+                f"{call.name} 은(는) 인자 {len(fn.params)}개가 필요합니다 ({len(call.args)}개 받음)",
+                call,
+                hint=f"선언: {call.name}({', '.join(str(p.type) + ' ' + p.name for p in fn.params)})",
+            )
+        # Evaluate every argument onto the stack first, then unload them into
+        # the callee's slots.  That keeps nested calls correct.
+        for param, arg in zip(fn.params, call.args):
+            t = self.gen_expr(arg)
+            self.coerce(t, param.type)
+            self.emit("PHA")
+            if param.type.size == 2:
+                self.emit("LDA __ah", "PHA")
+        for param in reversed(fn.params):
+            if param.type.size == 2:
+                self.emit("PLA", f"STA {self.param_label(fn.name, param.name)}+1")
+                self.emit("PLA", f"STA {self.param_label(fn.name, param.name)}")
+            else:
+                self.emit("PLA", f"STA {self.param_label(fn.name, param.name)}")
+        self.emit(f"JSR {self.func_label(fn.name)}")
+        ret = fn.ret_type if isinstance(fn.ret_type, Scalar) else VOID
+        return ret
+
+    def gen_builtin_call(self, call: ast.Call) -> Scalar:
+        builtin = BY_NAME[call.name]
+        if set(builtin.needs) - self.modules:
+            # Should not happen: scan_calls drives module selection.
+            raise self.err("E0601", f"{call.name} 런타임을 켜지 못했습니다", call)
+        if len(call.args) != len(builtin.params):
+            raise self.err(
+                "E0307",
+                f"{call.name} 은(는) 인자 {len(builtin.params)}개가 필요합니다 ({len(call.args)}개 받음)",
+                call,
+                hint=f"선언: {builtin.signature()}\n예: {builtin.example}",
+            )
+        pushed: List[Tuple[str, Scalar]] = []
+        for (pname, ptype), arg in zip(builtin.params, call.args):
+            if ptype is STR:
+                if not isinstance(arg, ast.StrLit):
+                    raise self.err(
+                        "E0602",
+                        f"{call.name} 의 '{pname}' 인자는 문자열 리터럴이어야 합니다",
+                        call,
+                        hint=f'예: {builtin.example}',
+                    )
+                label = self.intern_string(arg)
+                self.emit(f"LDA #<{label}", f"STA {self.builtin_arg(call.name, pname)}")
+                self.emit(f"LDA #>{label}", f"STA {self.builtin_arg(call.name, pname)}+1")
+                self.emit(
+                    f"LDA #{len(arg.value)}",
+                    f"STA {self.builtin_arg(call.name, 'len')}",
+                )
+                continue
+            t = self.gen_expr(arg)
+            self.coerce(t, ptype)
+            self.emit("PHA")
+            if ptype.size == 2:
+                self.emit("LDA __ah", "PHA")
+            pushed.append((pname, ptype))
+        for pname, ptype in reversed(pushed):
+            slot = self.builtin_arg(call.name, pname)
+            if ptype.size == 2:
+                self.emit("PLA", f"STA {slot}+1", "PLA", f"STA {slot}")
+            else:
+                self.emit("PLA", f"STA {slot}")
+        self.emit(f"JSR {builtin.label}")
+        return builtin.ret
+
+    def intern_string(self, lit: ast.StrLit) -> str:
+        tiles = [self.font_tile(ch, lit) for ch in lit.value]
+        for label, existing in self.strings:
+            if existing == tiles:
+                return label
+        label = f"__str{len(self.strings)}"
+        self.strings.append((label, tiles))
+        self.rodata.append("")
+        self.rodata.append(f"{label}:")
+        self.emit_byte_rows(tiles)
+        return label
+
+    def suggest(self, name: str) -> str:
+        candidates = list(BY_NAME) + list(self.functions)
+        best, best_score = "", 0.0
+        for candidate in candidates:
+            score = _similarity(name, candidate)
+            if score > best_score:
+                best, best_score = candidate, score
+        return best if best_score > 0.65 else ""
+
+    # -- static typing -----------------------------------------------------
+
+    def static_type(self, expr: ast.Expr) -> Scalar:
+        """Type of an expression without generating code."""
+
+        if isinstance(expr, ast.Num):
+            if -128 <= expr.value <= 255:
+                return I8 if expr.value < 0 else U8
+            return I16 if expr.value < 0 else U16
+        if isinstance(expr, ast.StrLit):
+            return U16
+        if isinstance(expr, ast.Var):
+            if self.lookup(expr.name, expr, soft=True) is None and self.constant_of(expr.name) is not None:
+                return U8
+            sym = self.lookup(expr.name, expr)
+            return sym.type if isinstance(sym.type, Scalar) else U8
+        if isinstance(expr, (ast.Index, ast.Field)):
+            return self.resolve_lvalue(expr).type
+        if isinstance(expr, ast.Call):
+            if expr.name in BY_NAME:
+                return BY_NAME[expr.name].ret
+            fn = self.functions.get(expr.name)
+            if fn is None:
+                return U8
+            return fn.ret_type if isinstance(fn.ret_type, Scalar) else VOID
+        if isinstance(expr, ast.Cast):
+            return expr.to
+        if isinstance(expr, ast.Unary):
+            if expr.op == "!":
+                return U8
+            inner = self.static_type(expr.expr)
+            return I8 if (expr.op == "-" and inner.size == 1) else inner
+        if isinstance(expr, ast.PostIncDec):
+            return self.static_type(expr.target)
+        if isinstance(expr, ast.Assign):
+            return self.static_type(expr.target)
+        if isinstance(expr, ast.Ternary):
+            return promote(self.static_type(expr.then_expr), self.static_type(expr.else_expr))
+        if isinstance(expr, ast.SizeOf):
+            return U8
+        if isinstance(expr, ast.Binary):
+            if expr.op in ("&&", "||", "==", "!=", "<", "<=", ">", ">="):
+                return U8
+            left = self.static_type(expr.left)
+            if expr.op in ("<<", ">>"):
+                return left
+            return promote(left, self.static_type(expr.right))
+        return U8
+
+
+def _similarity(a: str, b: str) -> float:
+    """Cheap edit-distance ratio, used only for 'did you mean' hints."""
+
+    if a == b:
+        return 1.0
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return 0.0
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        for j in range(1, lb + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+        prev = cur
+    return 1.0 - prev[lb] / max(la, lb)

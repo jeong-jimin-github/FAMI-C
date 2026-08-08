@@ -119,10 +119,10 @@ asset sfx SFX_JUMP = { {12, N_C5}, {11, N_E5}, {9, N_G5}, {6, N_C6}, {3, N_C6} }
 ## `asset song`
 
 ```c
-asset song NAME = { speed, {p1,p2,tri,noise}, ... };
+asset song NAME = { speed[, frac], {p1,p2,tri,noise}, ... };
 ```
 
-행 단위 BGM. speed 는 행당 프레임 수. 0=쉼, HOLD=유지, N_* = 음.
+행 단위 BGM. speed 는 행당 프레임 수, frac 은 그 소수부(1/256). 0=쉼, HOLD=유지, N_*=음. 노이즈는 NOISE_* 또는 8~15(생 음색).
 
 ```c
 asset song SONG_MAIN = { 8,

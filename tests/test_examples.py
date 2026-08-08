@@ -105,5 +105,80 @@ class SpecTests(unittest.TestCase):
                 self.run_spec(path)
 
 
+
+class ArrangementTests(unittest.TestCase):
+    """The tetris BGM must actually sound the notes its asset declares.
+
+    `examples/tetris_song.c` is the original hand-worked arrangement, migrated
+    out of the old compressed format. Comparing the APU period writes against
+    the rows the compiler stored checks the whole chain -- asset parsing, the
+    note tables, and the driver's hold/rest handling -- and would have caught
+    the doubled note-table index that made every pitch wrong.
+    """
+
+    def test_song_rows_reach_the_apu_as_written(self):
+        from famic.assets import NOTE_PERIODS, NOTE_PERIODS_TRI
+
+        result = build_example("tetris")
+        song_id = result.assets.constants["SONG_TETRIS"]
+        _, rows = result.assets.songs[song_id]
+        self.assertGreater(len(rows), 2000, "편곡이 잘렸습니다")
+
+        def expected(channel: int, table) -> list:
+            out, previous = [], None
+            for row in rows:
+                value = row[channel]
+                if value == 1:            # HOLD
+                    continue
+                if value != previous:
+                    if value:
+                        out.append(table[value])
+                    previous = value
+            return out
+
+        nes = NES(result.rom, result.symbols)
+        for frame in range(2400):
+            nes.set_pad(0, BUTTONS["START"] if frame == 20 else 0)
+            nes.run_frame()
+
+        def observed(lo_reg: int, hi_reg: int) -> list:
+            out, low = [], None
+            for _, addr, value in nes.apu.writes:
+                if addr == lo_reg:
+                    low = value
+                elif addr == hi_reg and low is not None:
+                    out.append(low | ((value & 0x07) << 8))
+                    low = None
+            return out
+
+        for name, channel, table, lo_reg, hi_reg in (
+            ("pulse1", 0, NOTE_PERIODS, 0x4002, 0x4003),
+            ("triangle", 2, NOTE_PERIODS_TRI, 0x400A, 0x400B),
+        ):
+            with self.subTest(channel=name):
+                want = expected(channel, table)
+                got = observed(lo_reg, hi_reg)
+                # The title song plays first; line up on the game song's opening.
+                start = next(
+                    (i for i in range(len(got)) if got[i : i + 8] == want[:8]), None
+                )
+                self.assertIsNotNone(start, "곡의 시작을 찾지 못했습니다")
+                tail = got[start:]
+                self.assertGreater(len(tail), 40, "비교할 음이 너무 적습니다")
+                self.assertEqual(tail, want[: len(tail)])
+
+    def test_percussion_uses_the_named_voices(self):
+        from famic.assets import NOISE_VOICES
+
+        result = build_example("tetris")
+        nes = NES(result.rom, result.symbols)
+        for frame in range(900):
+            nes.set_pad(0, BUTTONS["START"] if frame == 20 else 0)
+            nes.run_frame()
+        seen = {value for _, addr, value in nes.apu.writes if addr == 0x400C}
+        voices = {ctrl for _, ctrl, _ in NOISE_VOICES}
+        self.assertTrue(seen & voices, "타악기 음색이 하나도 쓰이지 않았습니다")
+
+
 if __name__ == "__main__":
     unittest.main()

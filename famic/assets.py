@@ -98,8 +98,11 @@ ASSET_KIND_DOCS: List[Dict[str, str]] = [
     },
     {
         "kind": "song",
-        "syntax": "asset song NAME = { speed, {p1,p2,tri,noise}, ... };",
-        "summary": "행 단위 BGM. speed 는 행당 프레임 수. 0=쉼, HOLD=유지, N_* = 음.",
+        "syntax": "asset song NAME = { speed[, frac], {p1,p2,tri,noise}, ... };",
+        "summary": (
+            "행 단위 BGM. speed 는 행당 프레임 수, frac 은 그 소수부(1/256). "
+            "0=쉼, HOLD=유지, N_*=음. 노이즈는 NOISE_* 또는 8~15(생 음색)."
+        ),
         "example": (
             "asset song SONG_MAIN = { 8,\n"
             "    { N_C4, N_E5, N_C3, 1 },\n"
@@ -200,8 +203,13 @@ def note_constants() -> List[Tuple[str, int]]:
     return out
 
 
-def note_periods() -> List[int]:
-    """11-bit APU timer values for every note id, index 0 = rest."""
+def note_periods(divider: float = 16.0) -> List[int]:
+    """11-bit APU timer values for every note id, index 0 = rest.
+
+    The pulse channels divide the CPU clock by 16 per period step and the
+    triangle by 32, so the triangle needs its own table.  Feeding it the pulse
+    table would play every bass line an octave low.
+    """
 
     periods = [0, 0]
     cpu = 1789773.0
@@ -209,9 +217,35 @@ def note_periods() -> List[int]:
         for semitone in range(12):
             midi = (octave + 1) * 12 + semitone
             freq = 440.0 * (2.0 ** ((midi - 69) / 12.0))
-            period = int(round(cpu / (16.0 * freq))) - 1
-            periods.append(max(8, min(0x7FF, period)))
+            period = int(round(cpu / (divider * freq))) - 1
+            periods.append(max(2, min(0x7FF, period)))
     return periods
+
+
+# Percussion voices the noise channel can play.  Each is ($400C, $400E): a
+# volume/envelope byte and a period-with-mode byte.  Values 2..7 name these;
+# 8..15 are raw noise periods 0..7 at a fixed volume, as an escape hatch.
+NOISE_VOICES: List[Tuple[str, int, int]] = [
+    ("NOISE_HAT", 0x34, 0x82),
+    ("NOISE_HAT_OPEN", 0x35, 0x84),
+    ("NOISE_KICK", 0x3F, 0x0E),
+    ("NOISE_SNARE", 0x3C, 0x06),
+    ("NOISE_TOM", 0x3A, 0x0B),
+    ("NOISE_CYMBAL", 0x37, 0x83),
+]
+
+NOISE_BASE = 2
+
+
+def noise_tables() -> Tuple[List[int], List[int]]:
+    """($400C, $400E) pairs indexed by (noise value - 2)."""
+
+    ctrl = [c for _, c, _ in NOISE_VOICES]
+    period = [p for _, _, p in NOISE_VOICES]
+    for raw in range(16 - NOISE_BASE - len(NOISE_VOICES)):
+        ctrl.append(0x38)
+        period.append(raw)
+    return ctrl, period
 
 
 # --------------------------------------------------------------------------
@@ -240,6 +274,7 @@ class CompiledAssets:
     metatiles: List[Tuple[int, int, int, int, int]] = field(default_factory=list)
     maps: List[Tuple[int, int, List[int]]] = field(default_factory=list)
     sfx: List[List[Tuple[int, int]]] = field(default_factory=list)
+    # (phase increment per frame, rows)
     songs: List[Tuple[int, List[Tuple[int, int, int, int]]]] = field(default_factory=list)
 
     font_base: int = -1
@@ -582,13 +617,27 @@ class AssetCompiler:
                 hint="예: asset song S = { 8, { N_C4, 0, N_C3, 0 }, ... };",
             )
         speed = self.resolve_atom(body[0], decl)
+        # An optional second scalar is the fractional part in 1/256 frames, so
+        # a tempo like 6.53 frames per row is expressible exactly enough.
+        frac = 0
+        rest = body[1:]
+        if rest and not isinstance(rest[0], list):
+            frac = self.resolve_atom(rest[0], decl)
+            rest = rest[1:]
+            if not 0 <= frac <= 255:
+                raise self.err(
+                    "E0509",
+                    f"{decl.name}: speed 소수부는 0~255 입니다 ({frac})",
+                    decl,
+                    hint="{ 6, 136, ... } 은 행당 6+136/256 프레임입니다.",
+                )
         if not 1 <= speed <= 60:
             raise self.err(
                 "E0509", f"{decl.name}: speed 는 1~60 입니다 ({speed})", decl,
                 hint="60프레임=1초. speed 8 이면 초당 7.5행입니다.",
             )
         rows: List[Tuple[int, int, int, int]] = []
-        for entry in body[1:]:
+        for entry in rest:
             if not isinstance(entry, list) or len(entry) != 4:
                 raise self.err(
                     "E0509",
@@ -613,17 +662,24 @@ class AssetCompiler:
             rows.append(tuple(values))  # type: ignore[arg-type]
         if not rows:
             raise self.err("E0509", f"{decl.name}: 행이 하나도 없습니다", decl)
-        if len(rows) > 1024:
+        # A row is four bytes, so the real ceiling is PRG space; the assembler
+        # reports that as E0702 with the actual numbers.  This bound only
+        # exists to keep the 16-bit row counter honest.
+        if len(rows) > 16000:
             raise self.err(
                 "E0509",
-                f"{decl.name}: {len(rows)}행은 너무 깁니다 (최대 1024)",
+                f"{decl.name}: {len(rows)}행은 너무 깁니다 (최대 16000)",
                 decl,
-                hint="반복되는 부분은 곡을 나눠 이어 재생하세요.",
+                hint=f"행 하나가 4바이트라 {len(rows) * 4}바이트입니다. 곡을 나누세요.",
             )
         if len(self.out.songs) >= 16:
             raise self.err("E0509", "곡은 16개까지입니다", decl)
+        # The driver runs on a phase accumulator, so any fractional frames-per
+        # -row is exact to within 1/65536 of a frame.
+        frames = speed + frac / 256.0
+        increment = max(1, min(0xFFFF, int(round(65536.0 / frames))))
         self.declare(decl.name, len(self.out.songs), "song", decl)
-        self.out.songs.append((speed, rows))
+        self.out.songs.append((increment, rows))
 
     @staticmethod
     def _flat(value: object) -> List[object]:
@@ -636,7 +692,8 @@ class AssetCompiler:
         return out
 
 
-NOTE_PERIODS = note_periods()
+NOTE_PERIODS = note_periods(16.0)
+NOTE_PERIODS_TRI = note_periods(32.0)
 NOTE_LOOKUP = dict(note_constants())
 
 # SPR_PAL0 and friends are `#define`s in fami.h, but an asset list is a natural

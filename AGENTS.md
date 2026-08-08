@@ -235,14 +235,31 @@ asset sfx SFX_JUMP = { {13, N_C5}, {12, N_E5}, {10, N_G5}, {7, N_C6} };
 
 ```c
 asset song SONG_MAIN = { 9,                       /* 행당 프레임 수 */
-    { N_C4, N_C5, N_C2, 4 },    /* {펄스1, 펄스2, 삼각파, 노이즈} */
-    { HOLD, N_E5, HOLD, 0 },    /* HOLD = 앞 음 유지, 0 = 쉼표     */
-    { N_E4, N_G5, HOLD, 6 }
+    { N_C4, N_C5, N_C2, NOISE_KICK },   /* {펄스1, 펄스2, 삼각파, 노이즈} */
+    { HOLD, N_E5, HOLD, 0          },   /* HOLD = 앞 음 유지, 0 = 쉼표   */
+    { N_E4, N_G5, HOLD, NOISE_HAT  }
 };
 ```
 
-노이즈 채널은 `0`(쉼) `1`(유지) `2`~`15`(음색)만 받는다. 곡은 끝나면 처음으로 돌아간다.
+노이즈 채널은 `0`(쉼) `HOLD`(유지) 그리고 타악기 음색을 받는다:
+`NOISE_HAT` `NOISE_HAT_OPEN` `NOISE_KICK` `NOISE_SNARE` `NOISE_TOM` `NOISE_CYMBAL`
+(`8`~`15`는 생 노이즈 주기 0~7).
+
+곡은 끝나면 처음으로 돌아간다.
 음 이름은 `N_C1` ~ `N_B7` (`N_CS4`는 C#4). 전체 목록은 `include/fami.h`.
+
+**정수 프레임으로 안 떨어지는 템포**는 두 번째 숫자에 1/256 프레임 단위 소수부를 준다.
+138 BPM 16분음표는 행당 6.53프레임이므로:
+
+```c
+asset song SONG_BGM = { 6, 136,   /* 6 + 136/256 = 6.53 프레임/행 */
+    { N_CS4, 0, 0, 0 },
+    ...
+};
+```
+
+긴 곡은 별도 파일에 두고 `#include "song.c"` 하면 된다
+(`examples/tetris_song.c`가 2448행짜리 예다).
 
 ---
 

@@ -32,7 +32,7 @@ from __future__ import annotations
 from typing import Dict, List, Sequence, Set
 
 from .api import BY_NAME
-from .assets import CompiledAssets, NOTE_PERIODS
+from .assets import CompiledAssets, NOTE_PERIODS, NOTE_PERIODS_TRI, noise_tables
 
 
 VRAM_QUEUE_SIZE = 64
@@ -187,8 +187,10 @@ class Runtime:
             out += [
                 ".zp __mus_ptr 2",
                 ".zp __mus_playing 1",
-                ".zp __mus_speed 1",
-                ".zp __mus_timer 1",
+                ".zp __mus_inc_lo 1",
+                ".zp __mus_inc_hi 1",
+                ".zp __mus_phase_lo 1",
+                ".zp __mus_phase_hi 1",
                 ".zp __mus_left_lo 1",
                 ".zp __mus_left_hi 1",
                 ".zp __mus_base_lo 1",
@@ -269,6 +271,9 @@ class Runtime:
                 "STA $4000",
                 "STA $4004",
                 "STA $400C",
+                "LDA #$08",
+                "STA $4001",
+                "STA $4005",
                 "LDA #$00",
                 "STA $4008",
             )
@@ -1670,7 +1675,6 @@ class Runtime:
             "ORA #$30",
             "STA $4004",
             "LDA __sfx_note,X",
-            "ASL A",
             "TAY",
             "LDA __note_lo,Y",
             "STA $4006",
@@ -1697,7 +1701,10 @@ class Runtime:
             "STA __rp+1",
             "LDY #$00",
             "LDA (__rp),Y",
-            "STA __mus_speed",
+            "STA __mus_inc_lo",
+            "INY",
+            "LDA (__rp),Y",
+            "STA __mus_inc_hi",
             "INY",
             "LDA (__rp),Y",
             "STA __mus_rows_lo",
@@ -1708,15 +1715,19 @@ class Runtime:
             "STA __mus_left_hi",
             "LDA __rp",
             "CLC",
-            "ADC #$03",
+            "ADC #$04",
             "STA __mus_ptr",
             "STA __mus_base_lo",
             "LDA __rp+1",
             "ADC #$00",
             "STA __mus_ptr+1",
             "STA __mus_base_hi",
+            # Start one increment short of overflow so row zero sounds on the
+            # very next NMI rather than a tempo period later.
+            "LDA #$FF",
+            "STA __mus_phase_lo",
+            "STA __mus_phase_hi",
             "LDA #$01",
-            "STA __mus_timer",
             "STA __mus_playing",
             "LDA #$0F",
             "STA $4015",
@@ -1750,7 +1761,6 @@ class Runtime:
             "RTS",
             "__music_resume_ok:",
             "LDA #$01",
-            "STA __mus_timer",
             "STA __mus_playing",
             "RTS",
             "",
@@ -1759,12 +1769,16 @@ class Runtime:
             "BNE __music_tick_go",
             "RTS",
             "__music_tick_go:",
-            "DEC __mus_timer",
-            "BEQ __music_row",
+            "CLC",
+            "LDA __mus_phase_lo",
+            "ADC __mus_inc_lo",
+            "STA __mus_phase_lo",
+            "LDA __mus_phase_hi",
+            "ADC __mus_inc_hi",
+            "STA __mus_phase_hi",
+            "BCS __music_row",
             "RTS",
             "__music_row:",
-            "LDA __mus_speed",
-            "STA __mus_timer",
             "JSR __music_apply",
             "LDA __mus_ptr",
             "CLC",
@@ -1808,11 +1822,8 @@ class Runtime:
             "STA $4000",
             "JMP __music_p2",
             "__music_p1_note:",
-            "LDA #$B8",
+            "LDA #$7B",
             "STA $4000",
-            "TYA",
-            "ASL A",
-            "TAY",
             "LDA __note_lo,Y",
             "STA $4002",
             "LDA __note_hi,Y",
@@ -1835,11 +1846,8 @@ class Runtime:
             "STA $4004",
             "JMP __music_tri",
             "__music_p2_note:",
-            "LDA #$76",
+            "LDA #$36",
             "STA $4004",
-            "TYA",
-            "ASL A",
-            "TAY",
             "LDA __note_lo,Y",
             "STA $4006",
             "LDA __note_hi,Y",
@@ -1858,12 +1866,9 @@ class Runtime:
             "__music_tri_note:",
             "LDA #$FF",
             "STA $4008",
-            "TYA",
-            "ASL A",
-            "TAY",
-            "LDA __note_lo,Y",
+            "LDA __note_tri_lo,Y",
             "STA $400A",
-            "LDA __note_hi,Y",
+            "LDA __note_tri_hi,Y",
             "ORA #$08",
             "STA $400B",
             # noise: 0 rest, 1 hold, 2..15 timbre
@@ -1878,14 +1883,16 @@ class Runtime:
             "STA $400C",
             "RTS",
             "__music_noise_hit:",
-            "LDA #$38",
-            "STA $400C",
             "TYA",
             "SEC",
             "SBC #$02",
             "AND #$0F",
+            "TAX",
+            "LDA __noise_ctrl,X",
+            "STA $400C",
+            "LDA __noise_period,X",
             "STA $400E",
-            "LDA #$08",
+            "LDA #$F8",
             "STA $400F",
             "__music_apply_done:",
             "RTS",
@@ -1927,6 +1934,17 @@ class Runtime:
             out.append("")
             emit_bytes("__note_lo", [p & 0xFF for p in NOTE_PERIODS])
             emit_bytes("__note_hi", [(p >> 8) & 0xFF for p in NOTE_PERIODS])
+
+        if self.has("music"):
+            # The triangle divides by 32 rather than 16, so it needs its own
+            # periods; sharing the pulse table plays every bass note an
+            # octave low.
+            out.append("")
+            emit_bytes("__note_tri_lo", [p & 0xFF for p in NOTE_PERIODS_TRI])
+            emit_bytes("__note_tri_hi", [(p >> 8) & 0xFF for p in NOTE_PERIODS_TRI])
+            ctrl, period = noise_tables()
+            emit_bytes("__noise_ctrl", ctrl)
+            emit_bytes("__noise_period", period)
 
         if self.has("palette"):
             out.append("")
@@ -1974,8 +1992,13 @@ class Runtime:
 
         if self.has("music"):
             out.append("")
-            for i, (speed, rows) in enumerate(a.songs):
-                payload = [speed, len(rows) & 0xFF, (len(rows) >> 8) & 0xFF]
+            for i, (increment, rows) in enumerate(a.songs):
+                payload = [
+                    increment & 0xFF,
+                    (increment >> 8) & 0xFF,
+                    len(rows) & 0xFF,
+                    (len(rows) >> 8) & 0xFF,
+                ]
                 for row in rows:
                     payload.extend(row)
                 emit_bytes(f"__song_data{i}", payload)

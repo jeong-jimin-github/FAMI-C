@@ -366,21 +366,43 @@ void handle_das(u8 pad) {
 ```c
 asset song SONG_MAIN = { 9,     /* 한 행이 9프레임 = 초당 6.7행 */
     /* 펄스1(멜로디), 펄스2(화음), 삼각파(베이스), 노이즈(타악) */
-    { N_C5, N_E4, N_C2, 4 },
-    { HOLD, HOLD, HOLD, 0 },    /* HOLD = 앞 음 유지 */
-    { N_E5, N_G4, HOLD, 6 },
-    { HOLD, HOLD, HOLD, 0 },
-    { N_G5, N_C5, N_G2, 4 },
-    { HOLD, HOLD, HOLD, 0 },
-    { N_E5, N_G4, HOLD, 6 },
-    { 0,    0,    0,    0 }     /* 0 = 쉼표 */
+    { N_C5, N_E4, N_C2, NOISE_KICK  },
+    { HOLD, HOLD, HOLD, 0           },   /* HOLD = 앞 음 유지 */
+    { N_E5, N_G4, HOLD, NOISE_HAT   },
+    { HOLD, HOLD, HOLD, 0           },
+    { N_G5, N_C5, N_G2, NOISE_SNARE },
+    { HOLD, HOLD, HOLD, 0           },
+    { N_E5, N_G4, HOLD, NOISE_HAT   },
+    { 0,    0,    0,    0           }    /* 0 = 쉼표 */
 };
 ```
 
 - 마디를 4행 또는 8행으로 맞추면 듣기에 자연스럽다.
 - 베이스(삼각파)는 멜로디보다 2옥타브 아래에서 코드 근음을 짚으면 된다.
-- 노이즈는 `4`(약한 타격)와 `6`(강한 타격)만 번갈아 써도 리듬이 산다.
+- 타악기: `NOISE_KICK`(1·3박) + `NOISE_SNARE`(2·4박) + 나머지에 `NOISE_HAT` 이면 기본이 된다.
+  `NOISE_HAT_OPEN` `NOISE_TOM` `NOISE_CYMBAL` 도 있다.
 - 곡은 끝나면 자동으로 처음으로 돌아간다.
+
+### 정수가 아닌 템포
+
+BPM 을 프레임으로 나누면 대개 딱 떨어지지 않는다. 두 번째 숫자가 1/256 프레임
+단위 소수부다.
+
+```
+행당 프레임 = 3600 / (BPM * 행당박자분할)
+예) 138 BPM, 16분음표(박당 4행) -> 3600 / (138*4) = 6.52 -> { 6, 134, ... }
+```
+
+### 긴 곡
+
+행이 수백 개를 넘으면 별도 파일로 빼고 include 한다. asset 선언은 어느 파일에
+있든 같다.
+
+```c
+#include "mysong.c"     /* asset song SONG_BGM = { ... }; 이 안에 있다 */
+```
+
+`examples/tetris_song.c` 가 2448행(4분 26초)짜리 실제 예다.
 
 ---
 

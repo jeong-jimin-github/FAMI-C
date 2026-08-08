@@ -237,14 +237,14 @@ asset sfx SFX_OVER  = { {13, N_C4}, {13, N_B3}, {12, N_A3}, {11, N_G3}, {10, N_F
 /* --- BGM: 한 행이 {펄스1, 펄스2, 삼각파, 노이즈}. speed = 행당 프레임 --- */
 
 asset song SONG_STAGE = { 9,
-    { N_C4, N_C5, N_C2, 4 },   { HOLD, N_E5, HOLD, 0 },
-    { N_E4, N_G5, HOLD, 6 },   { HOLD, N_E5, HOLD, 0 },
-    { N_G4, N_C6, N_G2, 4 },   { HOLD, N_G5, HOLD, 0 },
-    { N_E4, N_E5, HOLD, 6 },   { HOLD, N_C5, HOLD, 0 },
-    { N_F4, N_A5, N_F2, 4 },   { HOLD, N_C6, HOLD, 0 },
-    { N_A4, N_F6, HOLD, 6 },   { HOLD, N_C6, HOLD, 0 },
-    { N_G4, N_B5, N_G2, 4 },   { HOLD, N_D6, HOLD, 0 },
-    { N_B4, N_G5, HOLD, 6 },   { 0,    0,    0,    0 }
+    { N_C4, N_C5, N_C2, NOISE_KICK  },  { HOLD, N_E5, HOLD, NOISE_HAT },
+    { N_E4, N_G5, HOLD, NOISE_SNARE },  { HOLD, N_E5, HOLD, NOISE_HAT },
+    { N_G4, N_C6, N_G2, NOISE_KICK  },  { HOLD, N_G5, HOLD, NOISE_HAT },
+    { N_E4, N_E5, HOLD, NOISE_SNARE },  { HOLD, N_C5, HOLD, NOISE_HAT },
+    { N_F4, N_A5, N_F2, NOISE_KICK  },  { HOLD, N_C6, HOLD, NOISE_HAT },
+    { N_A4, N_F6, HOLD, NOISE_SNARE },  { HOLD, N_C6, HOLD, NOISE_HAT },
+    { N_G4, N_B5, N_G2, NOISE_KICK  },  { HOLD, N_D6, HOLD, NOISE_HAT },
+    { N_B4, N_G5, HOLD, NOISE_SNARE },  { 0,    0,    0,    NOISE_HAT_OPEN }
 };
 
 asset song SONG_TITLE = { 14,

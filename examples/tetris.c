@@ -81,26 +81,34 @@ asset sfx SFX_OVER   = { {13, N_C4}, {12, N_B3}, {12, N_AS3}, {11, N_A3}, {10, N
                          {9, N_G3}, {8, N_FS3}, {7, N_F3}, {5, N_E3}, {4, N_DS3},
                          {3, N_D3}, {2, N_CS3}, {1, N_C3} };
 
-/* --- BGM: 32행 루프 --- */
+/* --- BGM ---
+ *
+ * 게임 중 BGM 은 원본 편곡(2448행, 4:26)이라 분량이 커서 별도 파일에 있다.
+ * asset 선언은 어느 파일에 있든 같으므로 그냥 include 하면 된다.
+ */
+
+#include "tetris_song.c"
+
+/* 짧은 곡은 이렇게 그 자리에 쓰면 된다. */
 
 asset song SONG_MAIN = { 8,
-    { N_E5, N_E4, N_E2, 4 },  { N_B4, HOLD, HOLD, 0 },
-    { N_C5, N_A4, N_A2, 3 },  { N_D5, HOLD, HOLD, 0 },
-    { N_E5, N_GS4, N_E2, 4 }, { N_D5, HOLD, HOLD, 0 },
-    { N_C5, N_A4, N_A2, 3 },  { N_B4, HOLD, HOLD, 0 },
-    { N_A4, N_A4, N_A2, 4 },  { HOLD, HOLD, HOLD, 0 },
-    { N_C5, N_C5, N_E2, 3 },  { N_E5, HOLD, HOLD, 0 },
-    { N_A5, N_E5, N_A2, 4 },  { N_GS5, HOLD, HOLD, 0 },
-    { N_E5, N_B4, N_E2, 3 },  { 0, 0, 0, 0 },
+    { N_E5, N_E4, N_E2, NOISE_KICK },  { N_B4, HOLD, HOLD, 0 },
+    { N_C5, N_A4, N_A2, NOISE_SNARE },  { N_D5, HOLD, HOLD, 0 },
+    { N_E5, N_GS4, N_E2, NOISE_KICK }, { N_D5, HOLD, HOLD, 0 },
+    { N_C5, N_A4, N_A2, NOISE_SNARE },  { N_B4, HOLD, HOLD, 0 },
+    { N_A4, N_A4, N_A2, NOISE_KICK },  { HOLD, HOLD, HOLD, 0 },
+    { N_C5, N_C5, N_E2, NOISE_SNARE },  { N_E5, HOLD, HOLD, 0 },
+    { N_A5, N_E5, N_A2, NOISE_KICK },  { N_GS5, HOLD, HOLD, 0 },
+    { N_E5, N_B4, N_E2, NOISE_SNARE },  { 0, 0, 0, 0 },
 
-    { N_D5, N_D4, N_D2, 4 },  { N_F5, HOLD, HOLD, 0 },
-    { N_A5, N_A4, N_A2, 3 },  { N_G5, HOLD, HOLD, 0 },
-    { N_F5, N_C5, N_F2, 4 },  { N_E5, HOLD, HOLD, 0 },
-    { N_C5, N_A4, N_A2, 3 },  { N_E5, HOLD, HOLD, 0 },
-    { N_D5, N_D5, N_D2, 4 },  { N_C5, HOLD, HOLD, 0 },
-    { N_B4, N_B4, N_E2, 3 },  { N_C5, HOLD, HOLD, 0 },
-    { N_D5, N_D5, N_GS2, 4 }, { N_E5, HOLD, HOLD, 0 },
-    { N_C5, N_C5, N_A2, 3 },  { 0, 0, 0, 0 }
+    { N_D5, N_D4, N_D2, NOISE_KICK },  { N_F5, HOLD, HOLD, 0 },
+    { N_A5, N_A4, N_A2, NOISE_SNARE },  { N_G5, HOLD, HOLD, 0 },
+    { N_F5, N_C5, N_F2, NOISE_KICK },  { N_E5, HOLD, HOLD, 0 },
+    { N_C5, N_A4, N_A2, NOISE_SNARE },  { N_E5, HOLD, HOLD, 0 },
+    { N_D5, N_D5, N_D2, NOISE_KICK },  { N_C5, HOLD, HOLD, 0 },
+    { N_B4, N_B4, N_E2, NOISE_SNARE },  { N_C5, HOLD, HOLD, 0 },
+    { N_D5, N_D5, N_GS2, NOISE_KICK }, { N_E5, HOLD, HOLD, 0 },
+    { N_C5, N_C5, N_A2, NOISE_SNARE },  { 0, 0, 0, 0 }
 };
 
 asset song SONG_TITLE = { 12,
@@ -540,7 +548,7 @@ void start_game(void) {
     refill_bag();
     next_piece = take_piece();
     ppu_on();
-    music_play(SONG_MAIN);
+    music_play(SONG_TETRIS);
     spawn_piece();
 }
 

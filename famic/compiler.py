@@ -24,6 +24,7 @@ class BuildResult:
     symbols: Dict[str, int]
     warnings: List[Diagnostic] = field(default_factory=list)
     info: Dict[str, object] = field(default_factory=dict)
+    assets: Optional[CompiledAssets] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -63,10 +64,11 @@ def compile_source(
 
     info = dict(info)
     info.update(assembler.ram_usage())
-    info["prg_used"] = _prg_used(prg)
     for item in warnings.items:
         item.file = file
-    return BuildResult(rom, asm, assembler.symbol_table(), warnings.items, info)
+    return BuildResult(
+        rom, asm, assembler.symbol_table(), warnings.items, info, assets
+    )
 
 
 def _mentions_text(source: str) -> bool:
@@ -79,15 +81,6 @@ def _mentions_text(source: str) -> bool:
     """
 
     return "bg_text" in source or "bg_number" in source or '"' in source
-
-
-def _prg_used(prg: bytes) -> int:
-    """Bytes of PRG that are not filler, as a rough size signal for agents."""
-
-    tail = len(prg)
-    while tail > 0 and prg[tail - 1] == 0xFF:
-        tail -= 1
-    return tail
 
 
 def build_file(

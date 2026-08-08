@@ -586,6 +586,12 @@ music_resume();
 | `SPR_BEHIND` | `0x20` | 배경 뒤에 그림 |
 | `SPR_FLIP_X` | `0x40` | 좌우 반전 |
 | `SPR_FLIP_Y` | `0x80` | 상하 반전 |
+| `NOISE_HAT` | `2` | asset song 노이즈: 닫은 하이햇 |
+| `NOISE_HAT_OPEN` | `3` | asset song 노이즈: 열린 하이햇 |
+| `NOISE_KICK` | `4` | asset song 노이즈: 킥 |
+| `NOISE_SNARE` | `5` | asset song 노이즈: 스네어 |
+| `NOISE_TOM` | `6` | asset song 노이즈: 톰 |
+| `NOISE_CYMBAL` | `7` | asset song 노이즈: 심벌 |
 | `SCREEN_TILES_W` | `32` | 네임테이블 가로 타일 수 |
 | `SCREEN_TILES_H` | `30` | 네임테이블 세로 타일 수 |
 | `SCREEN_CELLS_W` | `16` | 16x16 셀 가로 개수 |

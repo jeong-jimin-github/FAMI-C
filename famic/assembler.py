@@ -115,6 +115,7 @@ class Assembler:
         self.zp_pc = ZP_BASE
         self.ram_pc = RAM_BASE
         self.pc = PRG_BASE
+        self.bytes_written = 0
 
     # -- driver ------------------------------------------------------------
 
@@ -220,6 +221,7 @@ class Assembler:
 
     def pass2(self, lines: Sequence[AsmLine]) -> bytes:
         self.pc = PRG_BASE
+        self.bytes_written = 0
         prg = bytearray([0xFF] * PRG_SIZE)
         for line in lines:
             if line.op is None or line.op in (".ZP", ".RAM", ".SET"):
@@ -384,6 +386,7 @@ class Assembler:
             )
         prg[self.pc - PRG_BASE] = value & 0xFF
         self.pc += 1
+        self.bytes_written += 1
 
     # -- output ------------------------------------------------------------
 
@@ -392,6 +395,8 @@ class Assembler:
 
     def ram_usage(self) -> Dict[str, int]:
         return {
+            "prg_used": self.bytes_written,
+            "prg_free": PRG_SIZE - self.bytes_written,
             "zp_used": self.zp_pc - ZP_BASE,
             "zp_free": ZP_TOP - self.zp_pc,
             "ram_used": self.ram_pc - RAM_BASE,

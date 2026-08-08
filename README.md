@@ -72,7 +72,8 @@ void main(void) {
 - [`examples/platformer.c`](examples/platformer.c) — 스프라이트, 고정소수점 물리,
   메타타일 스테이지 4개, 순찰병, 보석, 가시, BGM/효과음
 - [`examples/tetris.c`](examples/tetris.c) — 배경 전용. 7-bag, 벽 차기, 락 딜레이,
-  레벨, 줄 지우기 연출, 최고 점수 이름 입력
+  레벨, 줄 지우기 연출, 최고 점수 이름 입력, 4분 26초 BGM
+  ([`examples/tetris_song.c`](examples/tetris_song.c), 2448행)
 
 ## 개발
 

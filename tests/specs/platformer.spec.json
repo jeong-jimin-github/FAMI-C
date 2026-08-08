@@ -1,0 +1,14 @@
+{
+  "name": "platformer: 시작 -> 이동 -> 점프",
+  "rom": "../../build/platformer.nes",
+  "steps": [
+    { "frames": 20, "assert": { "_g_state": 0 } },
+    { "input": ["START"], "frames": 2 },
+    { "frames": 20, "assert": { "_g_state": 1, "_g_lives": 3, "_g_hero__x": 16 } },
+    { "input": ["RIGHT"], "frames": 20,
+      "assert": { "_g_hero__x": { "gt": 30 }, "_g_on_ground": 1 } },
+    { "input": ["A"], "frames": 12,
+      "assert": { "_g_hero__y": { "lt": 170 }, "_g_on_ground": 0 } },
+    { "frames": 40, "assert": { "_g_on_ground": 1, "_g_hero__y": { "gt": 170 } } }
+  ]
+}

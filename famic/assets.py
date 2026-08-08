@@ -314,6 +314,8 @@ class AssetCompiler:
                     return self.enums[name]
                 if name in NOTE_LOOKUP:
                     return NOTE_LOOKUP[name]
+                if name in API_CONSTANTS:
+                    return API_CONSTANTS[name]
                 raise self.err(
                     "E0510",
                     f"'{name}' 을(를) 찾을 수 없습니다",
@@ -636,3 +638,14 @@ class AssetCompiler:
 
 NOTE_PERIODS = note_periods()
 NOTE_LOOKUP = dict(note_constants())
+
+# SPR_PAL0 and friends are `#define`s in fami.h, but an asset list is a natural
+# place to reach for them, and forgetting the include should not produce a
+# baffling "not found" on a name the toolchain obviously knows.
+def _api_constants() -> Dict[str, int]:
+    from .api import CONSTANTS
+
+    return {name: value for name, value, _, _ in CONSTANTS}
+
+
+API_CONSTANTS = _api_constants()

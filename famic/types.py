@@ -124,8 +124,11 @@ def width(t: object) -> int:
 def promote(a: Scalar, b: Scalar) -> Scalar:
     """Usual arithmetic conversion, narrowed to what the backend implements.
 
-    Mixing widths promotes to 16 bits; mixing signedness at the same width
-    prefers unsigned, matching C.
+    Mixing widths promotes to 16 bits.  Mixing signedness at 8 bits promotes
+    to 16 bits as well: `i8 < u8` has no correct answer inside one byte, and C
+    resolves it by promoting both to `int` before comparing.  Getting this
+    wrong would make a comparison quietly return the opposite answer, which is
+    exactly the class of bug an agent cannot diagnose from the outside.
     """
 
     if a.is_void or b.is_void:
@@ -134,11 +137,13 @@ def promote(a: Scalar, b: Scalar) -> Scalar:
             "void 값은 연산에 쓸 수 없습니다",
             hint="void를 반환하는 함수의 결과를 식에 넣지 마세요.",
         )
-    size = max(a.size, b.size)
-    signed = a.signed and b.signed
-    if size == 1:
-        return I8 if signed else U8
-    return I16 if signed else U16
+    if a.size == 1 and b.size == 1:
+        if a.signed == b.signed:
+            return I8 if a.signed else U8
+        return I16
+    # At 16 bits there is nothing wider to promote to, so follow C and let
+    # unsigned win.
+    return I16 if (a.signed and b.signed) else U16
 
 
 def widen(t: Scalar) -> Scalar:

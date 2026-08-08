@@ -398,7 +398,56 @@ class CodeGenerator:
     def const_value(self, value: object, node: object) -> int:
         if isinstance(value, int):
             return value
+        if isinstance(value, ast.Expr):
+            return self.fold_const(value, node)
         raise self.err("E0404", f"상수식이 필요합니다: {value!r}", node)
+
+    def fold_const(self, expr: ast.Expr, node: object) -> int:
+        """Evaluate an initialiser expression that names assets or constants."""
+
+        if isinstance(expr, ast.Num):
+            return expr.value
+        if isinstance(expr, ast.Var):
+            value = self.constant_of(expr.name)
+            if value is None:
+                raise self.err(
+                    "E0404",
+                    f"'{expr.name}' 은(는) 컴파일 시각 상수가 아닙니다",
+                    expr,
+                    hint=(
+                        "초기값에는 숫자, enum, #define, asset 이름만 쓸 수 있습니다. "
+                        "asset 은 자기를 쓰는 배열보다 먼저 선언해야 합니다."
+                    ),
+                )
+            return value
+        if isinstance(expr, ast.Unary):
+            inner = self.fold_const(expr.expr, node)
+            return {"+": inner, "-": -inner, "~": ~inner, "!": int(not inner)}[expr.op]
+        if isinstance(expr, ast.Binary):
+            a = self.fold_const(expr.left, node)
+            b = self.fold_const(expr.right, node)
+            if expr.op in ("/", "%") and b == 0:
+                raise self.err("E0406", "0으로 나눌 수 없습니다", expr)
+            return {
+                "+": lambda: a + b, "-": lambda: a - b, "*": lambda: a * b,
+                "/": lambda: a // b, "%": lambda: a % b,
+                "<<": lambda: a << b, ">>": lambda: a >> b,
+                "&": lambda: a & b, "|": lambda: a | b, "^": lambda: a ^ b,
+                "==": lambda: int(a == b), "!=": lambda: int(a != b),
+                "<": lambda: int(a < b), "<=": lambda: int(a <= b),
+                ">": lambda: int(a > b), ">=": lambda: int(a >= b),
+                "&&": lambda: int(bool(a) and bool(b)),
+                "||": lambda: int(bool(a) or bool(b)),
+            }[expr.op]()
+        if isinstance(expr, ast.Ternary):
+            return (
+                self.fold_const(expr.then_expr, node)
+                if self.fold_const(expr.cond, node)
+                else self.fold_const(expr.else_expr, node)
+            )
+        if isinstance(expr, ast.Cast):
+            return self.fold_const(expr.expr, node)
+        raise self.err("E0404", "초기값이 상수식이 아닙니다", expr)
 
     def flatten(self, value: object) -> List[object]:
         out: List[object] = []
@@ -625,13 +674,10 @@ class CodeGenerator:
                 f"{decl.name}: 스칼라 변수에 중괄호 초기값을 줄 수 없습니다",
                 decl,
             )
-        value = decl.init
-        if isinstance(value, int):
-            self.emit(f"LDA #${value & 0xFF:02X}", f"STA {sym.label}")
-            if sym.type.size == 2:
-                self.emit(f"LDA #${(value >> 8) & 0xFF:02X}", f"STA {sym.label}+1")
-            return
-        raise self.err("E0404", f"{decl.name}: 초기값이 상수가 아닙니다", decl)
+        value = self.const_value(decl.init, decl)
+        self.emit(f"LDA #${value & 0xFF:02X}", f"STA {sym.label}")
+        if sym.type.size == 2:
+            self.emit(f"LDA #${(value >> 8) & 0xFF:02X}", f"STA {sym.label}+1")
 
     def gen_if(self, stmt: ast.If) -> None:
         else_label = self.new_label("else")
@@ -736,7 +782,27 @@ class CodeGenerator:
     # Expressions
     # ------------------------------------------------------------------
 
-    def gen_expr(self, expr: ast.Expr) -> Scalar:
+    # Truncating a result to 8 bits gives the same answer whether the work was
+    # done in 8 or 16 bits, for these operators.  That is what lets `u8 i = i +
+    # 1;` stay a single-byte add even though `+` now yields a 16-bit type.
+    TRUNC_SAFE = {"+", "-", "*", "&", "|", "^", "<<"}
+    # Operators whose result can be wider than either operand.
+    WIDENING = {"+", "-", "*", "<<"}
+
+    def result_type(self, op: str, left: Scalar, right: Scalar) -> Scalar:
+        if op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||"):
+            return U8
+        if op == ">>":
+            return left
+        base = promote(left, right)
+        if op in self.WIDENING and base.size == 1:
+            # C promotes both operands to int before adding or multiplying, so
+            # `hi * 100` is 16 bits wide even when `hi` is a byte.  Keeping the
+            # old 8-bit result here is what made `30 * 100` come out as 184.
+            return I16 if base.signed else U16
+        return base
+
+    def gen_expr(self, expr: ast.Expr, want: Optional[Scalar] = None) -> Scalar:
         if isinstance(expr, ast.Num):
             value = expr.value
             if 0 <= value <= 255:
@@ -769,7 +835,7 @@ class CodeGenerator:
         if isinstance(expr, ast.PostIncDec):
             return self.gen_post(expr)
         if isinstance(expr, ast.Binary):
-            return self.gen_binary(expr)
+            return self.gen_binary(expr, want)
         if isinstance(expr, ast.Assign):
             return self.gen_assign(expr)
         if isinstance(expr, ast.Cast):
@@ -967,7 +1033,7 @@ class CodeGenerator:
     def gen_index(self, index: ast.Expr) -> None:
         """Evaluate an array index into X."""
 
-        t = self.gen_expr(index)
+        self.gen_expr(index, U8)
         self.emit("TAX")
 
     def gen_store(self, lv: LValue, value_type: Scalar) -> None:
@@ -1095,26 +1161,101 @@ class CodeGenerator:
         self.emit(f"{end_label}:")
         return promote(then_type, else_type)
 
-    def gen_binary(self, expr: ast.Binary) -> Scalar:
+    def gen_binary(self, expr: ast.Binary, want: Optional[Scalar] = None) -> Scalar:
         if expr.op == "&&":
             return self.gen_logical(expr, is_and=True)
         if expr.op == "||":
             return self.gen_logical(expr, is_and=False)
 
-        left_type = self.static_type(expr.left)
-        right_type = self.static_type(expr.right)
-        result = promote(left_type, right_type)
-        if expr.op in ("<<", ">>"):
-            result = left_type
+        left_type, right_type = self.operand_types(expr)
+        base = promote(left_type, right_type)
+        result = self.result_type(expr.op, left_type, right_type)
+        if base.signed and expr.op in ("/", "%"):
+            return self.gen_signed_divide(expr, base)
 
-        if result.size == 1:
-            return self.gen_binary8(expr, result)
-        return self.gen_binary16(expr, result)
+        narrow = want is not None and want.size == 1 and expr.op in self.TRUNC_SAFE
+        if narrow:
+            # The caller only wants a byte, so do the whole subtree in bytes.
+            narrowed = I8 if base.signed else U8
+            self.gen_binary8(expr, narrowed, want=U8, operand=base)
+            return narrowed
+        # The working width comes from the operands.  A comparison of two
+        # u16 values yields a u8, but it still has to be computed 16 bits wide.
+        if base.size == 1:
+            if expr.op == "*":
+                # __mul8 already produces both halves, so widening an 8x8
+                # multiply costs nothing extra.
+                self.gen_binary8(expr, base, want=U8, operand=base)
+                return result
+            if result.size == 1:
+                return self.gen_binary8(expr, result, want=U8, operand=base)
+        return self.gen_binary16(expr, result, operand=base)
 
-    def gen_binary8(self, expr: ast.Binary, result: Scalar) -> Scalar:
-        self.gen_expr(expr.left)
+    def operand_types(self, expr: ast.Binary) -> Tuple[Scalar, Scalar]:
+        """Operand types, letting small literals adopt the other side's sign.
+
+        `vy > 6` where `vy` is `i8` should be a signed comparison.  Typing the
+        literal `6` as `u8` would promote the whole thing to 16 bits for no
+        reason; worse, it would do so inconsistently with what the author
+        meant.  A literal in 0..127 fits both signednesses, so it takes the
+        other operand's.
+        """
+
+        left = self.static_type(expr.left)
+        right = self.static_type(expr.right)
+        if isinstance(expr.right, ast.Num) and 0 <= expr.right.value <= 127 and left.size == 1:
+            right = left
+        elif isinstance(expr.left, ast.Num) and 0 <= expr.left.value <= 127 and right.size == 1:
+            left = right
+        return left, right
+
+    def gen_signed_divide(self, expr: ast.Binary, result: Scalar) -> Scalar:
+        """Signed / and % are only supported for power-of-two divisors.
+
+        A general signed division needs sign fixup around the unsigned
+        routine.  Rather than ship a half-correct one, the common case (a
+        power of two, which becomes an arithmetic shift) is handled and
+        everything else is a diagnostic that says what to write instead.
+        """
+
+        divisor = expr.right
+        if isinstance(divisor, ast.Num) and divisor.value > 0 and not (divisor.value & (divisor.value - 1)):
+            shift = divisor.value.bit_length() - 1
+            if expr.op == "/":
+                return self.gen_binary(
+                    ast.Binary(
+                        line=expr.line, col=expr.col, op=">>",
+                        left=expr.left, right=ast.Num(value=shift),
+                    )
+                )
+            return self.gen_binary(
+                ast.Binary(
+                    line=expr.line, col=expr.col, op="&",
+                    left=expr.left, right=ast.Num(value=divisor.value - 1),
+                )
+            )
+        raise self.err(
+            "E0402",
+            f"부호 있는 값의 {expr.op} 연산은 지원하지 않습니다",
+            expr,
+            hint=(
+                "2의 거듭제곱으로 나누면 됩니다 (`v / 2`, `v / 16`). "
+                "그 외에는 abs8() 로 절댓값을 구해 나눈 뒤 부호를 다시 붙이세요."
+            ),
+        )
+
+    def gen_binary8(
+        self,
+        expr: ast.Binary,
+        result: Scalar,
+        want: Optional[Scalar] = None,
+        operand: Optional[Scalar] = None,
+    ) -> Scalar:
+        operand = operand or result
+        inner = want if expr.op in self.TRUNC_SAFE else None
+        self.gen_expr(expr.left, inner)
         self.emit("PHA")
-        self.gen_expr(expr.right)
+        self.gen_expr(expr.right, inner)
         self.emit("STA __t0", "PLA")
         op = expr.op
         if op == "+":
@@ -1147,7 +1288,7 @@ class CodeGenerator:
             self.emit("LDX __t0", f"BEQ {done}", f"{loop}:")
             if op == "<<":
                 self.emit("ASL A")
-            elif result.signed:
+            elif operand.signed:
                 # Arithmetic shift right: feed bit 7 back in through the carry.
                 self.emit("CMP #$80", "ROR A")
             else:
@@ -1155,7 +1296,7 @@ class CodeGenerator:
             self.emit("DEX", f"BNE {loop}", f"{done}:")
             return result
         if op in ("==", "!=", "<", "<=", ">", ">="):
-            return self.gen_compare8(op, result.signed)
+            return self.gen_compare8(op, operand.signed)
         raise self.err("E0401", f"지원하지 않는 연산자 {op}", expr)
 
     def gen_compare8(self, op: str, signed: bool) -> Scalar:
@@ -1189,7 +1330,10 @@ class CodeGenerator:
         )
         return U8
 
-    def gen_binary16(self, expr: ast.Binary, result: Scalar) -> Scalar:
+    def gen_binary16(
+        self, expr: ast.Binary, result: Scalar, operand: Optional[Scalar] = None
+    ) -> Scalar:
+        operand = operand or result
         # left -> stack, right -> __rl/__rh, left back into A/__ah
         left_type = self.gen_expr(expr.left)
         self.to16(left_type)
@@ -1239,10 +1383,10 @@ class CodeGenerator:
             self.emit("DEX", f"BNE {loop}", f"{done}:")
             return result
         if op in ("==", "!=", "<", "<=", ">", ">="):
-            return self.gen_compare16(op)
+            return self.gen_compare16(op, operand.signed)
         raise self.err("E0401", f"지원하지 않는 연산자 {op}", expr)
 
-    def gen_compare16(self, op: str) -> Scalar:
+    def gen_compare16(self, op: str, signed: bool = False) -> Scalar:
         """Compare A/__ah against __rl/__rh, leaving 0 or 1 in A."""
 
         true_label = self.new_label("c16_true")
@@ -1257,14 +1401,22 @@ class CodeGenerator:
             else:
                 self.emit(f"BNE {true_label}", f"JMP {false_label}")
         else:
-            # a < b and a >= b read the carry of a - b; a > b and a <= b are
+            # a < b and a >= b read the result of a - b; a > b and a <= b are
             # the same test with the operands swapped.
             if op in ("<", ">="):
                 self.emit("LDA __t0", "SEC", "SBC __rl", "LDA __ah", "SBC __rh")
-                branch = "BCC" if op == "<" else "BCS"
+                want_less = op == "<"
             else:
                 self.emit("LDA __rl", "SEC", "SBC __t0", "LDA __rh", "SBC __ah")
-                branch = "BCC" if op == ">" else "BCS"
+                want_less = op == ">"
+            if signed:
+                # Signed less-than is N xor V; folding V into the sign bit
+                # turns it back into a plain BMI/BPL.
+                fix = self.new_label("c16_ovf")
+                self.emit(f"BVC {fix}", "EOR #$80", f"{fix}:")
+                branch = "BMI" if want_less else "BPL"
+            else:
+                branch = "BCC" if want_less else "BCS"
             self.emit(f"{branch} {true_label}", f"JMP {false_label}")
         self.emit(
             f"{true_label}:",
@@ -1308,7 +1460,7 @@ class CodeGenerator:
                 hint="const 배열/상수는 ROM에 있습니다. 바꾸려면 const 를 빼고 전역 변수로 두세요.",
             )
         if expr.op == "=":
-            value_type = self.gen_expr(expr.value)
+            value_type = self.gen_expr(expr.value, lv.type)
             self.coerce(value_type, lv.type)
             self.gen_store(lv, lv.type)
             return lv.type
@@ -1316,7 +1468,7 @@ class CodeGenerator:
         combined = ast.Binary(
             line=expr.line, col=expr.col, op=binop, left=expr.target, right=expr.value
         )
-        value_type = self.gen_expr(combined)
+        value_type = self.gen_expr(combined, lv.type)
         self.coerce(value_type, lv.type)
         self.gen_store(lv, lv.type)
         return lv.type
@@ -1346,7 +1498,7 @@ class CodeGenerator:
         # Evaluate every argument onto the stack first, then unload them into
         # the callee's slots.  That keeps nested calls correct.
         for param, arg in zip(fn.params, call.args):
-            t = self.gen_expr(arg)
+            t = self.gen_expr(arg, param.type)
             self.coerce(t, param.type)
             self.emit("PHA")
             if param.type.size == 2:
@@ -1391,7 +1543,7 @@ class CodeGenerator:
                     f"STA {self.builtin_arg(call.name, 'len')}",
                 )
                 continue
-            t = self.gen_expr(arg)
+            t = self.gen_expr(arg, ptype)
             self.coerce(t, ptype)
             self.emit("PHA")
             if ptype.size == 2:
@@ -1468,12 +1620,8 @@ class CodeGenerator:
         if isinstance(expr, ast.SizeOf):
             return U8
         if isinstance(expr, ast.Binary):
-            if expr.op in ("&&", "||", "==", "!=", "<", "<=", ">", ">="):
-                return U8
-            left = self.static_type(expr.left)
-            if expr.op in ("<<", ">>"):
-                return left
-            return promote(left, self.static_type(expr.right))
+            left, right = self.operand_types(expr)
+            return self.result_type(expr.op, left, right)
         return U8
 
 

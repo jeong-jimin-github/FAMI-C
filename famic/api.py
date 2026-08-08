@@ -174,6 +174,16 @@ BUILTINS: List[Builtin] = [
         notes="A-Z 0-9 와 공백 . , : - ! ? + / ( ) 만 있습니다. 소문자는 대문자로 바뀝니다.",
     ),
     _b(
+        "bg_char",
+        VOID,
+        [("x", U8), ("y", U8), ("code", U8)],
+        "background",
+        "ASCII 코드 한 글자를 찍는다. 문자열 리터럴이 아닌 글자를 그릴 때.",
+        "bg_char(4, 6, 'A' + letter_index);",
+        needs=("vram", "font"),
+        notes="폰트에 없는 글자는 공백으로 나옵니다. 소문자는 대문자로 바뀝니다.",
+    ),
+    _b(
         "bg_number",
         VOID,
         [("x", U8), ("y", U8), ("value", U16), ("digits", U8)],

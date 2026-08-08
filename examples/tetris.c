@@ -1,1877 +1,919 @@
-extern void wait_vblank(void);
-extern void ppu_put(unsigned char x, unsigned char y, unsigned char tile);
-extern void ppu_off(void);
-extern void ppu_on(void);
-extern unsigned char read_pad(void);
-extern unsigned char rand8(void);
-extern void render_queue(void);
-extern void ppu_write_preview(void);
-/* Legacy helper name; the selector now identifies one of four 5-row chunks. */
-extern void ppu_write_board_half(unsigned char quarter);
-extern void music_init(void);
-extern void music_pause(void);
-extern void music_resume(void);
-extern void sfx_play(unsigned char effect);
+/* FAMI-C 예제: 낙하 블록 퍼즐
+ *
+ * 플랫포머가 스프라이트/물리의 표준 구현이라면, 이쪽은 배경 전용 게임의
+ * 표준 구현이다. 스프라이트를 하나도 쓰지 않고 네임테이블만 갱신한다.
+ *
+ * 배경 갱신 규칙 (중요)
+ *   bg_tile() 은 렌더링 중이면 큐에 넣고 다음 vblank 에 반영한다. 큐가 차면
+ *   NMI 가 비울 때까지 기다린다. 그래서 줄 지우기처럼 200칸을 한 번에 다시
+ *   그려도 화면이 깨지지 않고, 몇 프레임에 걸쳐 반영될 뿐이다.
+ *   타이밍을 직접 맞출 필요가 없다.
+ */
 
-/* MUSIC_DATA_START */
-const unsigned char MUSIC_PULSE1_BASE[77] = {
-    61, 85, 85, 85, 85, 84, 89, 84, 0, 73, 73, 73, 72, 68, 72, 72,
-    68, 73, 72, 72, 73, 73, 73, 75, 73, 77, 75, 73, 75, 73, 70, 73,
-    73, 75, 77, 74, 79, 79, 79, 77, 79, 74, 81, 79, 77, 79, 74, 77,
-    86, 82, 81, 77, 77, 82, 77, 84, 76, 74, 79, 81, 80, 87, 79, 77,
-    77, 75, 79, 82, 84, 82, 84, 81, 81, 55, 58, 55, 62,
+#include <fami.h>
+
+/* ======================================================================
+ * 1. 에셋
+ * ==================================================================== */
+
+asset palette PAL_GAME = {
+    /* 0: HUD 글자  1: 블록  2: 우물 테두리  3: 예비 */
+    0x0F, 0x30, 0x10, 0x00,
+    0x0F, 0x30, 0x21, 0x11,
+    0x0F, 0x2D, 0x00, 0x10,
+    0x0F, 0x16, 0x27, 0x37,
+    0x0F, 0x30, 0x21, 0x11,   0x0F, 0x30, 0x21, 0x11,
+    0x0F, 0x30, 0x21, 0x11,   0x0F, 0x30, 0x21, 0x11
 };
 
-const unsigned char MUSIC_PULSE1_PAIR0[77] = {
-    17, 17, 17, 85, 17, 17, 17, 17, 0, 17, 51, 51, 17, 102, 34, 17,
-    85, 0, 68, 17, 17, 51, 51, 17, 85, 68, 17, 0, 17, 170, 68, 221,
-    17, 221, 17, 0, 17, 17, 51, 102, 102, 68, 34, 17, 136, 17, 187, 136,
-    17, 85, 68, 85, 102, 17, 51, 17, 68, 102, 51, 102, 51, 17, 68, 102,
-    17, 17, 17, 17, 51, 85, 51, 17, 17, 209, 31, 209, 20,
+/* 레벨이 오를 때마다 블록 색만 바꾼다. NES 는 16x16 칸마다 팔레트를
+ * 하나씩 고르므로, 8x8 블록에 조각별 색을 주려면 색이 번져 버린다.
+ * 그래서 색은 레벨을 따라가고, 조각은 무늬로 구분한다. */
+const u8 LEVEL_COLOR[10] = { 0x21, 0x2A, 0x25, 0x27, 0x2C, 0x24, 0x28, 0x23, 0x26, 0x2B };
+
+/* 7개 조각 얼굴. 무늬가 서로 달라서 흑백으로 봐도 구분된다. */
+asset tiles T_BLOCK[7] = {
+    "2222222." "2111111." "2111111." "2111111." "2111111." "2111111." "2111111." "........"
+    "2222222." "2133311." "2133311." "2111111." "2111111." "2111111." "2111111." "........"
+    "2222222." "2111111." "2111111." "2113311." "2113311." "2111111." "2111111." "........"
+    "2222222." "2111111." "2111111." "2111111." "2111111." "2113331." "2113331." "........"
+    "2222222." "2311111." "2311111." "2311111." "2311111." "2311111." "2311111." "........"
+    "2222222." "2111113." "2111113." "2111113." "2111113." "2111113." "2111113." "........"
+    "2222222." "2333333." "2111111." "2111111." "2111111." "2333333." "2111111." "........"
 };
 
-const unsigned char MUSIC_PULSE1_PAIR1[77] = {
-    17, 19, 51, 83, 17, 18, 17, 18, 0, 17, 17, 17, 17, 85, 17, 17,
-    83, 17, 34, 18, 17, 49, 51, 19, 85, 66, 19, 0, 19, 170, 65, 221,
-    19, 17, 17, 17, 17, 19, 49, 102, 99, 68, 34, 17, 129, 20, 187, 136,
-    17, 85, 66, 81, 102, 17, 49, 17, 65, 97, 49, 17, 49, 17, 65, 97,
-    22, 19, 16, 19, 17, 83, 49, 18, 18, 31, 51, 20, 68,
+asset tile T_WALL = {
+    "22222222"
+    "23333332"
+    "23222232"
+    "23233232"
+    "23233232"
+    "23222232"
+    "23333332"
+    "22222222"
 };
 
-const unsigned char MUSIC_PULSE1_PAIR2[77] = {
-    17, 51, 17, 51, 17, 34, 17, 34, 0, 51, 16, 16, 34, 80, 16, 17,
-    51, 51, 32, 34, 16, 17, 51, 51, 17, 34, 51, 17, 51, 17, 17, 17,
-    51, 17, 17, 17, 17, 51, 17, 102, 51, 68, 34, 136, 17, 68, 187, 136,
-    17, 17, 34, 17, 102, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
-    102, 51, 17, 51, 51, 51, 17, 34, 34, 51, 85, 68, 0,
+asset tile T_FLOOR = {
+    "22222222"
+    "23232323"
+    "22222222"
+    "32323232"
+    "22222222"
+    "23232323"
+    "22222222"
+    "32323232"
 };
 
-const unsigned char MUSIC_PULSE1_PAIR3[77] = {
-    17, 17, 51, 17, 17, 68, 17, 17, 0, 17, 17, 0, 17, 17, 0, 17,
-    17, 17, 17, 68, 17, 51, 17, 52, 17, 17, 48, 17, 51, 17, 68, 17,
-    17, 17, 17, 68, 17, 68, 51, 17, 17, 20, 33, 136, 17, 136, 20, 17,
-    17, 17, 17, 133, 81, 17, 136, 17, 153, 187, 136, 17, 136, 17, 153, 187,
-    136, 102, 17, 85, 17, 17, 51, 68, 17, 68, 136, 136, 0,
+/* --- 효과음 --- */
+
+asset sfx SFX_MOVE   = { {6, N_C5}, {3, N_C5} };
+asset sfx SFX_ROTATE = { {8, N_G5}, {6, N_C6}, {3, N_C6} };
+asset sfx SFX_LOCK   = { {9, N_C3}, {7, N_G2}, {4, N_C2} };
+asset sfx SFX_DROP   = { {11, N_C4}, {9, N_G3}, {7, N_E3}, {4, N_C3}, {2, N_C2} };
+asset sfx SFX_LINE   = { {12, N_C5}, {12, N_E5}, {12, N_G5}, {11, N_C6},
+                         {10, N_E6}, {8, N_G6}, {5, N_C7}, {2, N_C7} };
+asset sfx SFX_TETRIS = { {13, N_C5}, {13, N_G5}, {13, N_C6}, {13, N_G6},
+                         {12, N_C7}, {11, N_G6}, {10, N_C7}, {8, N_E7},
+                         {6, N_G7}, {4, N_G7}, {2, N_G7} };
+asset sfx SFX_LEVEL  = { {12, N_C6}, {12, N_D6}, {12, N_E6}, {12, N_G6}, {9, N_C7},
+                         {6, N_C7}, {3, N_C7} };
+asset sfx SFX_OVER   = { {13, N_C4}, {12, N_B3}, {12, N_AS3}, {11, N_A3}, {10, N_GS3},
+                         {9, N_G3}, {8, N_FS3}, {7, N_F3}, {5, N_E3}, {4, N_DS3},
+                         {3, N_D3}, {2, N_CS3}, {1, N_C3} };
+
+/* --- BGM: 32행 루프 --- */
+
+asset song SONG_MAIN = { 8,
+    { N_E5, N_E4, N_E2, 4 },  { N_B4, HOLD, HOLD, 0 },
+    { N_C5, N_A4, N_A2, 3 },  { N_D5, HOLD, HOLD, 0 },
+    { N_E5, N_GS4, N_E2, 4 }, { N_D5, HOLD, HOLD, 0 },
+    { N_C5, N_A4, N_A2, 3 },  { N_B4, HOLD, HOLD, 0 },
+    { N_A4, N_A4, N_A2, 4 },  { HOLD, HOLD, HOLD, 0 },
+    { N_C5, N_C5, N_E2, 3 },  { N_E5, HOLD, HOLD, 0 },
+    { N_A5, N_E5, N_A2, 4 },  { N_GS5, HOLD, HOLD, 0 },
+    { N_E5, N_B4, N_E2, 3 },  { 0, 0, 0, 0 },
+
+    { N_D5, N_D4, N_D2, 4 },  { N_F5, HOLD, HOLD, 0 },
+    { N_A5, N_A4, N_A2, 3 },  { N_G5, HOLD, HOLD, 0 },
+    { N_F5, N_C5, N_F2, 4 },  { N_E5, HOLD, HOLD, 0 },
+    { N_C5, N_A4, N_A2, 3 },  { N_E5, HOLD, HOLD, 0 },
+    { N_D5, N_D5, N_D2, 4 },  { N_C5, HOLD, HOLD, 0 },
+    { N_B4, N_B4, N_E2, 3 },  { N_C5, HOLD, HOLD, 0 },
+    { N_D5, N_D5, N_GS2, 4 }, { N_E5, HOLD, HOLD, 0 },
+    { N_C5, N_C5, N_A2, 3 },  { 0, 0, 0, 0 }
 };
 
-const unsigned char MUSIC_PULSE2_BASE[30] = {
-    0, 58, 58, 58, 58, 58, 58, 56, 54, 56, 53, 58, 56, 51, 55, 51,
-    53, 57, 48, 50, 53, 54, 51, 58, 55, 39, 55, 55, 55, 55,
+asset song SONG_TITLE = { 12,
+    { N_A4, N_A3, N_A2, 0 }, { N_C5, HOLD, HOLD, 0 },
+    { N_E5, N_E4, HOLD, 0 }, { N_A5, HOLD, HOLD, 0 },
+    { N_G5, N_G3, N_G2, 0 }, { N_E5, HOLD, HOLD, 0 },
+    { N_C5, N_C4, HOLD, 0 }, { 0, 0, 0, 0 }
 };
 
-const unsigned char MUSIC_PULSE2_PAIR0[30] = {
-    0, 16, 29, 16, 208, 208, 208, 208, 209, 209, 209, 209, 243, 209, 209, 209,
-    209, 226, 209, 209, 209, 209, 209, 209, 0, 209, 16, 29, 16, 208,
+/* ======================================================================
+ * 2. 상수
+ * ==================================================================== */
+
+#define WELL_W       10
+#define WELL_H       20
+#define BOARD_SIZE   200        /* WELL_W * WELL_H */
+
+/* 우물의 왼쪽 위 타일 좌표. 우물 한 칸 = 타일 한 장(8x8). */
+#define WELL_X       11
+#define WELL_Y       4
+
+#define PIECE_COUNT  7
+#define SPAWN_X      3
+#define SPAWN_Y      0
+
+#define DAS_DELAY    16         /* 처음 눌림 -> 자동 반복까지 */
+#define DAS_RATE     6          /* 자동 반복 간격 */
+#define LOCK_DELAY   30         /* 바닥에 닿고 굳기까지 */
+#define CLEAR_FLASH  4          /* 줄 지우기 깜빡임 횟수 */
+#define CLEAR_TIME   6          /* 깜빡임 한 번의 프레임 수 */
+#define MAX_LEVEL    19
+#define BEST_COUNT   3
+
+enum { ST_TITLE, ST_PLAY, ST_CLEARING, ST_PAUSE, ST_NAME, ST_OVER };
+
+/* 조각 모양. 조각 7개 x 회전 4개 x 칸 4개.
+ * 한 바이트가 4x4 상자 안의 좌표 하나: (y << 2) | x.
+ * 회전은 전부 고정된 중심에 대한 진짜 회전이라, 돌려도 모양이 변하거나
+ * 옆으로 밀리지 않는다. */
+const u8 SHAPES[112] = {
+    /* I */  4, 5, 6, 7,    2, 6, 10, 14,   4, 5, 6, 7,    2, 6, 10, 14,
+    /* J */  0, 4, 5, 6,    1, 2, 5, 9,     4, 5, 6, 10,   1, 5, 8, 9,
+    /* L */  2, 4, 5, 6,    1, 5, 9, 10,    4, 5, 6, 8,    0, 1, 5, 9,
+    /* O */  1, 2, 5, 6,    1, 2, 5, 6,     1, 2, 5, 6,    1, 2, 5, 6,
+    /* S */  1, 2, 4, 5,    1, 5, 6, 10,    1, 2, 4, 5,    1, 5, 6, 10,
+    /* T */  1, 4, 5, 6,    1, 5, 6, 9,     4, 5, 6, 9,    1, 4, 5, 9,
+    /* Z */  0, 1, 5, 6,    2, 5, 6, 9,     0, 1, 5, 6,    2, 5, 6, 9
 };
 
-const unsigned char MUSIC_PULSE2_PAIR1[30] = {
-    0, 208, 13, 208, 13, 0, 221, 221, 221, 221, 221, 221, 255, 221, 221, 221,
-    221, 238, 221, 221, 221, 221, 221, 221, 0, 221, 208, 13, 208, 13,
-};
+/* 미리보기에서 조각을 가운데로 옮기는 보정. */
+const u8 PREVIEW_SHIFT[PIECE_COUNT] = { 0, 0, 0, 0, 0, 0, 0 };
 
-const unsigned char MUSIC_PULSE2_PAIR2[30] = {
-    0, 208, 208, 208, 16, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29,
-    29, 209, 29, 29, 46, 29, 243, 209, 29, 29, 208, 208, 208, 16,
-};
+/* 벽 차기: 회전이 막혔을 때 시도할 가로 이동. 0 은 제자리. */
+const u8 KICKS[5] = { 0, 255, 1, 254, 2 };
 
-const unsigned char MUSIC_PULSE2_PAIR3[30] = {
-    0, 221, 208, 16, 0, 13, 208, 208, 221, 221, 221, 221, 221, 221, 209, 209,
-    209, 221, 209, 209, 226, 209, 255, 221, 209, 209, 221, 208, 16, 0,
-};
-
-const unsigned char MUSIC_TRIANGLE_BASE[47] = {
-    0, 34, 30, 32, 36, 37, 30, 34, 32, 29, 30, 32, 29, 34, 32, 39,
-    41, 38, 31, 33, 36, 38, 29, 29, 45, 46, 36, 43, 38, 45, 34, 31,
-    29, 41, 42, 44, 41, 42, 38, 31, 39, 50, 45, 38, 33, 29, 36,
-};
-
-const unsigned char MUSIC_TRIANGLE_PAIR0[47] = {
-    0, 17, 17, 17, 34, 17, 1, 17, 17, 17, 17, 17, 17, 17, 51, 17,
-    17, 0, 17, 34, 17, 17, 17, 187, 34, 17, 17, 17, 17, 17, 17, 17,
-    17, 17, 17, 17, 17, 17, 17, 0, 1, 102, 100, 102, 100, 51, 49,
-};
-
-const unsigned char MUSIC_TRIANGLE_PAIR1[47] = {
-    0, 17, 17, 17, 34, 17, 17, 221, 221, 221, 221, 221, 221, 221, 255, 17,
-    0, 17, 221, 238, 17, 17, 221, 187, 34, 17, 17, 17, 17, 17, 17, 17,
-    17, 17, 17, 17, 17, 17, 0, 0, 17, 100, 68, 100, 68, 49, 17,
-};
-
-const unsigned char MUSIC_TRIANGLE_PAIR2[47] = {
-    0, 17, 17, 17, 17, 17, 17, 29, 29, 29, 17, 17, 17, 17, 17, 17,
-    17, 17, 17, 17, 17, 17, 34, 17, 17, 17, 17, 17, 17, 17, 17, 17,
-    17, 17, 17, 17, 17, 17, 17, 17, 17, 68, 34, 68, 34, 17, 68,
-};
-
-const unsigned char MUSIC_TRIANGLE_PAIR3[47] = {
-    0, 17, 17, 17, 17, 17, 17, 221, 221, 221, 221, 221, 221, 221, 221, 17,
-    0, 68, 221, 221, 17, 17, 238, 221, 17, 17, 136, 17, 136, 17, 221, 221,
-    221, 17, 51, 17, 102, 17, 0, 221, 17, 17, 17, 17, 17, 170, 68,
-};
-
-const unsigned char MUSIC_NOISE_PAIR0[70] = {
-    0, 96, 16, 16, 96, 48, 48, 96, 52, 97, 49, 49, 49, 65, 97, 49,
-    49, 96, 48, 96, 52, 48, 52, 52, 52, 96, 48, 64, 97, 49, 49, 49,
-    49, 49, 49, 49, 49, 96, 48, 68, 48, 17, 49, 22, 49, 17, 97, 49,
-    65, 4, 64, 52, 49, 68, 97, 53, 68, 53, 52, 49, 22, 97, 49, 49,
-    49, 97, 101, 85, 100, 68,
-};
-
-const unsigned char MUSIC_NOISE_PAIR1[70] = {
-    0, 17, 17, 96, 96, 17, 96, 17, 65, 33, 33, 33, 32, 65, 33, 33,
-    33, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 65, 81, 81, 81, 82,
-    82, 82, 81, 82, 82, 22, 17, 65, 81, 17, 17, 17, 17, 17, 17, 17,
-    17, 68, 0, 50, 68, 68, 81, 17, 68, 18, 50, 17, 17, 32, 32, 32,
-    51, 17, 85, 85, 68, 68,
-};
-
-const unsigned char MUSIC_NOISE_PAIR2[70] = {
-    0, 64, 16, 16, 48, 48, 48, 48, 64, 65, 65, 65, 65, 65, 49, 49,
-    68, 48, 48, 64, 64, 64, 64, 64, 64, 64, 64, 64, 65, 65, 65, 65,
-    65, 68, 97, 65, 68, 49, 48, 68, 68, 65, 65, 97, 17, 17, 49, 49,
-    97, 68, 97, 65, 65, 68, 97, 65, 65, 65, 65, 17, 68, 65, 65, 65,
-    68, 17, 85, 85, 68, 97,
-};
-
-const unsigned char MUSIC_NOISE_PAIR3[70] = {
-    0, 17, 17, 96, 17, 17, 96, 68, 68, 33, 33, 36, 33, 65, 33, 33,
-    65, 81, 81, 84, 81, 84, 84, 86, 68, 81, 81, 65, 81, 65, 81, 84,
-    81, 84, 81, 68, 68, 96, 16, 68, 65, 17, 49, 68, 49, 17, 17, 17,
-    17, 68, 81, 84, 83, 68, 81, 81, 51, 81, 68, 54, 68, 32, 32, 36,
-    64, 49, 53, 85, 68, 96,
-};
-
-const unsigned char MUSIC_TUPLE_PULSE1[156] = {
-    0, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 1, 7, 4, 1, 2,
-    3, 4, 1, 5, 6, 1, 2, 7, 4, 8, 8, 8, 9, 10, 9, 11,
-    12, 13, 14, 15, 16, 17, 18, 9, 11, 12, 13, 14, 9, 11, 15, 19,
-    20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 21, 34,
-    35, 36, 37, 38, 39, 36, 37, 40, 41, 42, 43, 44, 45, 46, 47, 48,
-    49, 50, 51, 52, 50, 53, 8, 8, 8, 8, 8, 8, 18, 15, 19, 28,
-    53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 61, 63, 61, 64, 6, 20,
-    21, 22, 26, 27, 25, 65, 29, 30, 31, 32, 33, 21, 34, 34, 35, 66,
-    41, 42, 46, 36, 37, 48, 50, 52, 50, 53, 53, 53, 67, 68, 69, 53,
-    70, 71, 48, 67, 72, 73, 74, 73, 74, 75, 76, 8,
-};
-
-const unsigned char MUSIC_TUPLE_PULSE2[156] = {
-    0, 1, 2, 3, 4, 3, 5, 1, 2, 3, 4, 1, 3, 5, 1, 2,
-    3, 4, 1, 3, 5, 1, 2, 3, 5, 0, 0, 0, 6, 6, 6, 6,
-    7, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 6, 6, 7, 7,
-    8, 9, 10, 11, 8, 10, 11, 8, 12, 8, 8, 10, 10, 13, 13, 0,
-    0, 14, 15, 16, 14, 14, 15, 16, 17, 14, 18, 19, 15, 20, 16, 21,
-    15, 16, 19, 14, 22, 17, 1, 2, 3, 4, 2, 5, 6, 7, 7, 11,
-    23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 8, 8, 10, 10, 13, 13, 0, 0, 0, 24,
-    17, 14, 20, 14, 15, 21, 16, 14, 25, 25, 25, 25, 26, 27, 28, 29,
-    26, 28, 29, 26, 28, 0, 0, 0, 0, 0, 0, 0,
-};
-
-const unsigned char MUSIC_TUPLE_TRIANGLE[156] = {
-    0, 1, 2, 3, 4, 3, 5, 1, 2, 3, 4, 1, 3, 5, 1, 6,
-    3, 4, 1, 3, 4, 1, 6, 3, 4, 1, 1, 1, 7, 7, 7, 7,
-    8, 8, 8, 8, 8, 7, 7, 7, 7, 8, 8, 8, 7, 7, 9, 9,
-    10, 11, 12, 13, 10, 12, 13, 10, 14, 10, 10, 12, 12, 15, 15, 16,
-    17, 18, 15, 12, 18, 18, 15, 12, 19, 18, 20, 21, 15, 22, 12, 10,
-    15, 12, 21, 18, 23, 24, 1, 2, 3, 4, 2, 4, 7, 9, 9, 13,
-    25, 26, 27, 26, 26, 28, 29, 30, 25, 31, 27, 15, 15, 32, 33, 34,
-    35, 36, 25, 34, 36, 25, 37, 37, 33, 33, 15, 15, 38, 21, 0, 39,
-    19, 18, 22, 18, 15, 10, 12, 18, 15, 15, 15, 15, 27, 40, 33, 24,
-    27, 33, 24, 27, 33, 41, 42, 43, 44, 45, 46, 15,
-};
-
-const unsigned char MUSIC_TUPLE_NOISE[156] = {
-    0, 1, 2, 2, 3, 2, 3, 4, 5, 6, 5, 5, 7, 8, 9, 10,
-    10, 11, 10, 10, 10, 12, 12, 10, 13, 14, 15, 16, 17, 18, 18, 18,
-    18, 18, 18, 18, 18, 19, 20, 21, 22, 21, 20, 23, 19, 20, 21, 24,
-    25, 26, 26, 26, 26, 26, 26, 25, 26, 26, 26, 26, 26, 26, 26, 25,
-    27, 28, 29, 30, 31, 30, 30, 30, 32, 33, 30, 32, 34, 33, 30, 35,
-    30, 32, 30, 32, 28, 36, 5, 5, 5, 37, 38, 39, 18, 18, 40, 26,
-    36, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 42, 43, 44,
-    45, 44, 45, 44, 44, 45, 46, 47, 47, 47, 46, 47, 48, 13, 49, 50,
-    51, 52, 53, 54, 55, 56, 57, 58, 44, 45, 59, 60, 61, 62, 62, 63,
-    62, 62, 62, 62, 64, 65, 45, 66, 67, 68, 69, 0,
-};
-
-const unsigned char MUSIC_ORDER0[256] = {
-    0, 0, 1, 2, 3, 4, 1, 2, 5, 6, 7, 8, 9, 10, 11, 8,
-    12, 13, 14, 15, 16, 17, 18, 15, 19, 20, 18, 15, 16, 17, 21, 22,
-    23, 24, 25, 26, 26, 27, 28, 29, 30, 31, 32, 33, 32, 34, 30, 29,
-    30, 31, 32, 33, 35, 36, 37, 38, 39, 40, 41, 42, 41, 43, 44, 38,
-    39, 45, 41, 42, 46, 47, 48, 49, 50, 51, 52, 49, 53, 54, 55, 49,
-    50, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-    71, 72, 65, 66, 67, 73, 74, 75, 76, 77, 65, 70, 67, 68, 69, 70,
-    78, 79, 80, 81, 82, 83, 74, 75, 84, 85, 86, 87, 88, 89, 86, 90,
-    88, 91, 14, 15, 16, 17, 18, 15, 23, 24, 28, 92, 30, 31, 32, 33,
-    32, 34, 28, 92, 30, 31, 32, 33, 93, 94, 48, 49, 50, 51, 52, 49,
-    53, 95, 55, 49, 50, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
-    67, 68, 69, 70, 71, 72, 65, 66, 67, 73, 74, 75, 76, 77, 65, 70,
-    67, 68, 69, 70, 78, 79, 80, 81, 82, 83, 74, 75, 84, 96, 97, 98,
-    99, 98, 100, 98, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112,
-    113, 114, 115, 112, 116, 114, 115, 112, 113, 117, 118, 119, 120, 121, 122, 123,
-    124, 125, 126, 127, 66, 67, 68, 69, 70, 71, 128, 65, 66, 67, 129, 74,
-};
-
-const unsigned char MUSIC_ORDER1[50] = {
-    75, 76, 130, 131, 70, 67, 68, 69, 132, 78, 133, 80, 134, 82, 135, 74,
-    75, 136, 137, 138, 139, 140, 141, 142, 143, 144, 141, 145, 146, 140, 141, 142,
-    143, 147, 141, 148, 149, 150, 151, 152, 153, 154, 155, 155, 155, 155, 155, 155,
-    155, 155,
-};
-/* MUSIC_DATA_END */
-
-#define BOARD_W 10
-#define BOARD_H 20
-#define BOARD_SIZE 200
-#define BOARD_X 10
-#define BOARD_Y 4
-
-#define STATE_TITLE 0
-#define STATE_PLAYING 1
-#define STATE_PAUSED 2
-#define STATE_GAMEOVER 3
-#define STATE_ENTRY 4
-
-#define STATUS_NONE 0
-#define STATUS_HELP 1
-#define STATUS_PAUSED 2
-#define STATUS_GAMEOVER 3
-#define STATUS_LEVEL 4
-#define STATUS_NAME 5
-
-#define PAD_A 128
-#define PAD_B 64
-#define PAD_START 16
-#define PAD_UP 8
-#define PAD_DOWN 4
-#define PAD_LEFT 2
-#define PAD_RIGHT 1
-
-#define DAS_DELAY 12
-#define DAS_REPEAT 3
-#define LOCK_DELAY 18
-
-/* Level select spans the ten single-digit levels plus a second row of ten. */
-#define MAX_LEVEL_PICK 19
-
-#define HI_COUNT 3
-#define NAME_LEN 3
-#define HI_NAME_SIZE 9
-#define HI_SCORE_SIZE 18
-#define LAST_LETTER 26
-
-#define TILE_DIGIT0 16
-#define TILE_LETTER_A 26
-#define TILE_FRAME_TL 54
-#define TILE_FRAME_TOP 55
-#define TILE_FRAME_TR 56
-#define TILE_FRAME_LEFT 57
-#define TILE_FRAME_RIGHT 58
-#define TILE_FRAME_BL 59
-#define TILE_FRAME_BOTTOM 60
-#define TILE_FRAME_BR 61
-#define TILE_SPARKLE 62
-#define TILE_FLASH 63
-#define TILE_LOGO 64
-#define TILE_ARROW_LEFT 88
-#define TILE_ARROW_RIGHT 89
-#define TILE_CARET 90
-#define TILE_SLOT 91
-
-/* Sound-effect slots; slot zero is reserved by the driver as "stop". */
-#define SFX_MOVE 1
-#define SFX_ROTATE 2
-#define SFX_SOFT 3
-#define SFX_LAND 4
-#define SFX_DROP 5
-#define SFX_LINE 6
-#define SFX_TETRIS 7
-#define SFX_LEVELUP 8
-#define SFX_GAMEOVER 9
-#define SFX_MENU 10
-#define SFX_CONFIRM 11
-
-/* String ids into TEXT_DATA.  The first eight are exactly eight tiles wide so
- * a status line always overwrites whatever the previous message left behind. */
-#define TXT_ROT 0
-#define TXT_UP_DROP 1
-#define TXT_DN_SOFT 2
-#define TXT_PAUSED 3
-#define TXT_GAME 4
-#define TXT_OVER 5
-#define TXT_START 6
-#define TXT_BLANK 7
-#define TXT_PRESS_START 8
-#define TXT_START_LEVEL 9
-#define TXT_BEST_PLAYERS 10
-#define TXT_SCORE 11
-#define TXT_LINES 12
-#define TXT_LEVEL 13
-#define TXT_NEXT 14
-#define TXT_TOP 15
-#define TXT_NEW_RECORD 16
-#define TXT_ENTER_NAME 17
-#define TXT_TETRIS 18
-#define TXT_FAMI_C 19
-#define TXT_RANK 20
-#define TXT_UD_LETTER 21
-#define TXT_LR_MOVE 22
-#define TXT_START_OK 23
-#define TXT_A_CW_B_CCW 24
-#define TXT_HARD_DROP 25
-#define TXT_SOFT_DROP 26
-#define TXT_LR_UD 27
-
-const unsigned char MASKS[4] = { 8, 4, 2, 1 };
-
-/* The next-piece box is four rows tall; three-wide pieces drop one row so they
- * sit level with the I and O previews. */
-const unsigned char PREVIEW_SHIFT[7] = { 0, 0, 1, 1, 1, 1, 1 };
-
-/* Rotation kicks, tried in order: in place, one left, one right, two left, two
- * right.  The two-cell kicks are what let a vertical I leave either wall. */
-const unsigned char KICKS[5] = { 0, 255, 1, 254, 2 };
-
-const unsigned char GAME_ATTRIBUTES[64] = {
-    95, 95, 31, 15, 15, 175, 175, 175,
-    85, 85, 17, 0, 0, 170, 170, 170,
-    85, 85, 17, 0, 0, 170, 170, 170,
-    85, 85, 17, 0, 0, 170, 170, 170,
-    85, 85, 17, 0, 0, 170, 170, 170,
-    85, 85, 17, 0, 0, 170, 170, 170,
-    85, 85, 17, 0, 0, 170, 170, 170,
-    0, 0, 0, 0, 0, 0, 0, 0
-};
-
-/* Menu screens use one background palette per eight tile rows: the logo band,
- * the level picker, the best-player table, and the footer.  Panels are laid
- * out inside a single band so a frame never changes colour halfway down.
- * Glyph ink is colour 3 in every palette, so text is free to sit anywhere. */
-const unsigned char MENU_ATTRIBUTES[64] = {
-    255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 255,
-    170, 170, 170, 170, 170, 170, 170, 170,
-    170, 170, 170, 170, 170, 170, 170, 170,
-    85, 85, 85, 85, 85, 85, 85, 85,
-    85, 85, 85, 85, 85, 85, 85, 85,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0
-};
-
-/* Four rows of four cells per rotation, one nibble per row, MSB is column 0.
- * Every state is a true rotation of state zero about a fixed centre, so a
- * rotation never mirrors a piece and never nudges it off its pivot.  I, S and
- * Z use the classic two-state cycle; T, J and L use all four. */
-const unsigned char SHAPES[112] = {
-    /* I */
-     0, 15,  0,  0,
-     2,  2,  2,  2,
-     0, 15,  0,  0,
-     2,  2,  2,  2,
-
-    /* O */
-     0,  6,  6,  0,
-     0,  6,  6,  0,
-     0,  6,  6,  0,
-     0,  6,  6,  0,
-
-    /* T */
-     4, 14,  0,  0,
-     4,  6,  4,  0,
-     0, 14,  4,  0,
-     4, 12,  4,  0,
-
-    /* Z */
-    12,  6,  0,  0,
-     2,  6,  4,  0,
-    12,  6,  0,  0,
-     2,  6,  4,  0,
-
-    /* S */
-     6, 12,  0,  0,
-     4,  6,  2,  0,
-     6, 12,  0,  0,
-     4,  6,  2,  0,
-
-    /* J */
-    14,  2,  0,  0,
-     2,  2,  6,  0,
-     0,  8, 14,  0,
-    12,  8,  8,  0,
-
-    /* L */
-    14,  8,  0,  0,
-     6,  2,  2,  0,
-     0,  2, 14,  0,
-     8,  8, 12,  0,
-};
-
-const unsigned char GRAVITY[30] = {
+/* 레벨별 낙하 간격(프레임). NES 원작의 곡선을 따른다. */
+const u8 GRAVITY[20] = {
     48, 43, 38, 33, 28, 23, 18, 13, 8, 6,
-    5, 5, 5, 4, 4, 4, 3, 3, 3, 2,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 1
+    5, 5, 5, 4, 4, 4, 3, 3, 3, 2
 };
 
-/* Tile ids for every on-screen string, packed end to end. */
-const unsigned char TEXT_DATA[227] = {
-    26, 52, 27, 0, 43, 40, 45, 0, 46, 41, 0, 29, 43, 40, 41, 0,
-    29, 39, 0, 44, 40, 31, 45, 0, 0, 41, 26, 46, 44, 30, 29, 0,
-    0, 0, 32, 26, 38, 30, 0, 0, 0, 0, 40, 47, 30, 43, 0, 0,
-    52, 44, 45, 26, 43, 45, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    41, 43, 30, 44, 44, 0, 44, 45, 26, 43, 45, 44, 45, 26, 43, 45,
-    0, 37, 30, 47, 30, 37, 27, 30, 44, 45, 0, 41, 37, 26, 50, 30,
-    43, 44, 44, 28, 40, 43, 30, 37, 34, 39, 30, 44, 37, 30, 47, 30,
-    37, 39, 30, 49, 45, 45, 40, 41, 39, 30, 48, 0, 43, 30, 28, 40,
-    43, 29, 30, 39, 45, 30, 43, 0, 39, 26, 38, 30, 45, 30, 45, 43,
-    34, 44, 31, 26, 38, 34, 52, 28, 43, 26, 39, 36, 46, 29, 0, 37,
-    30, 45, 45, 30, 43, 37, 43, 0, 38, 40, 47, 30, 44, 45, 26, 43,
-    45, 0, 40, 36, 26, 52, 28, 48, 0, 0, 27, 52, 28, 28, 48, 46,
-    41, 0, 33, 26, 43, 29, 0, 29, 43, 40, 41, 29, 40, 48, 39, 0,
-    44, 40, 31, 45, 0, 29, 43, 40, 41, 37, 43, 52, 17, 0, 0, 46,
-    29, 52, 21,
-};
+/* 한 번에 지운 줄 수별 점수 배수. (레벨+1) 을 곱한다. */
+const u16 LINE_SCORE[5] = { 0, 40, 100, 300, 1200 };
 
-const unsigned char TEXT_START[28] = {
-    0, 8, 16, 24, 32, 40, 48, 56, 64, 75, 86, 98, 103, 108, 113, 117,
-    120, 130, 140, 146, 152, 156, 165, 172, 180, 191, 203, 217,
-};
+const u8 DEFAULT_BEST[BEST_COUNT] = { 30, 20, 10 };   /* x100 점 */
 
-const unsigned char TEXT_LEN[28] = {
-    8, 8, 8, 8, 8, 8, 8, 8, 11, 11, 12, 5, 5, 5, 4, 3,
-    10, 10, 6, 6, 4, 9, 7, 8, 11, 12, 14, 10,
-};
+/* ======================================================================
+ * 3. 상태
+ * ==================================================================== */
 
-/* Sound effects: SFX_START/SFX_LENGTH locate a run of one-frame steps inside
- * the SFX_CTRL/SFX_TIMER_LO/SFX_TIMER_HI tables.  The driver replays those
- * steps on pulse 2 and hands the channel back to the song afterwards. */
-const unsigned char SFX_START[16] = {
-    0, 0, 2, 5, 6, 10, 16, 25, 41, 49, 71, 73, 0, 0, 0, 0,
-};
+u8 board[BOARD_SIZE];      /* 0 = 빈칸, 1..7 = 조각 종류 + 1 */
+u8 bag[PIECE_COUNT];
+u8 bag_pos;
+u8 next_piece;
 
-const unsigned char SFX_LENGTH[16] = {
-    0, 2, 3, 1, 4, 6, 9, 16, 8, 22, 2, 6, 0, 0, 0, 0,
-};
+u8 piece_t;                /* 지금 조각 종류 0..6 */
+u8 piece_r;                /* 회전 0..3 */
+u8 piece_x;
+u8 piece_y;
 
-const unsigned char SFX_CTRL[79] = {
-    179, 179, 117, 117, 117, 50, 54, 54, 54, 54, 120, 120, 120, 120, 120, 120,
-    184, 184, 184, 184, 184, 184, 184, 184, 184, 185, 185, 185, 185, 185, 185, 185,
-    185, 185, 185, 185, 185, 185, 185, 185, 185, 248, 248, 248, 248, 248, 248, 248,
-    248, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119,
-    119, 119, 119, 119, 119, 119, 119, 244, 244, 182, 182, 182, 182, 182, 182,
-};
+u8 state;
+u8 level;
+u8 start_level;
+u16 score;
+u16 lines;
+u8 drop_timer;
+u8 lock_timer;
+u8 grounded;
+u8 das_timer;
+u8 das_dir;
+u8 clear_timer;
+u8 clear_step;
+u8 clear_rows[4];
+u8 clear_count;
 
-const unsigned char SFX_TIMER_LO[79] = {
-    28, 28, 213, 142, 142, 58, 223, 126, 85, 85, 126, 169, 225, 45, 170, 170,
-    213, 213, 169, 169, 142, 142, 106, 106, 106, 213, 213, 169, 169, 142, 142, 106,
-    106, 142, 142, 106, 106, 84, 84, 84, 84, 169, 169, 126, 126, 84, 84, 84,
-    84, 253, 253, 253, 28, 28, 28, 64, 64, 64, 123, 123, 123, 196, 196, 196,
-    196, 58, 58, 58, 58, 58, 58, 112, 112, 169, 169, 112, 112, 112, 112,
-};
+u16 best_score[BEST_COUNT];
+u8 best_name[BEST_COUNT * 3];
+u8 name_slot;
+u8 name_pos;
+u8 name_char[3];
 
-const unsigned char SFX_TIMER_HI[79] = {
-    1, 1, 0, 0, 0, 2, 1, 2, 3, 3, 0, 0, 0, 1, 1, 1,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0,
-};
+u8 i;
+u8 j;
+u8 k;
 
-/* Letters are stored as 0 for blank and 1..26 for A..Z. */
-const unsigned char DEFAULT_NAMES[9] = {
-    6, 13, 3,
-    14, 5, 19,
-    20, 15, 16
-};
+/* ======================================================================
+ * 4. 우물 그리기
+ * ==================================================================== */
 
-/* Six digits per entry, least significant first: 010000, 005000, 002500. */
-const unsigned char DEFAULT_SCORES[18] = {
-    0, 0, 0, 0, 1, 0,
-    0, 0, 0, 5, 0, 0,
-    0, 0, 5, 2, 0, 0
-};
-
-unsigned char board[BOARD_SIZE];
-unsigned char bag[7];
-unsigned char bag_pos;
-unsigned char next_piece;
-
-unsigned char score_digits[6];
-unsigned char line_digits[3];
-unsigned char level;
-unsigned char start_level;
-unsigned char level_up;
-
-unsigned char game_state;
-unsigned char status_action;
-unsigned char pad;
-unsigned char prev_pad;
-
-unsigned char piece_x;
-unsigned char piece_y;
-unsigned char piece_t;
-unsigned char piece_r;
-unsigned char old_piece_x;
-unsigned char old_piece_y;
-unsigned char old_piece_r;
-unsigned char piece_dirty;
-unsigned char lock_pending;
-unsigned char drop_tick;
-unsigned char lock_tick;
-unsigned char das_direction;
-unsigned char das_tick;
-
-unsigned char erase_x[4];
-unsigned char erase_y[4];
-unsigned char draw_x[4];
-unsigned char draw_y[4];
-unsigned char erase_count;
-unsigned char draw_count;
-unsigned char preview_tiles[16];
-
-unsigned char clear_rows[4];
-unsigned char clear_count;
-
-unsigned char hi_name[HI_NAME_SIZE];
-unsigned char hi_score[HI_SCORE_SIZE];
-unsigned char entry_name[NAME_LEN];
-unsigned char entry_pos;
-unsigned char entry_rank;
-
-unsigned char shape_cell(unsigned char t, unsigned char r, unsigned char x, unsigned char y)
-{
-    unsigned char row;
-    row = SHAPES[((t * 4) + r) * 4 + y];
-    return row & MASKS[x];
+u8 cell_tile(u8 value) {
+    if (value == 0) return 0;
+    return T_BLOCK + value - 1;
 }
 
-unsigned char letter_tile(unsigned char c)
-{
-    if (c == 0) {
-        return 0;
-    }
-    return TILE_LETTER_A - 1 + c;
+void draw_cell(u8 cx, u8 cy) {
+    bg_tile(WELL_X + cx, WELL_Y + cy, cell_tile(board[cy * WELL_W + cx]));
 }
 
-/* Safe only while rendering is disabled: no vblank budget is respected. */
-void draw_text(unsigned char x, unsigned char y, unsigned char id)
-{
-    unsigned char i;
-    unsigned char base;
-    unsigned char count;
-
-    base = TEXT_START[id];
-    count = TEXT_LEN[id];
-    i = 0;
-    while (i < count) {
-        ppu_put(x + i, y, TEXT_DATA[base + i]);
-        i = i + 1;
-    }
-}
-
-void clear_screen_off(void)
-{
-    unsigned char x;
-    unsigned char y;
-
-    y = 0;
-    while (y < 30) {
-        x = 0;
-        while (x < 32) {
-            ppu_put(x, y, 0);
-            x = x + 1;
+void draw_board(void) {
+    for (i = 0; i < WELL_H; i++) {
+        for (j = 0; j < WELL_W; j++) {
+            draw_cell(j, i);
         }
-        y = y + 1;
     }
 }
 
-void draw_box_off(unsigned char x0, unsigned char y0, unsigned char x1, unsigned char y1)
-{
-    unsigned char x;
-    unsigned char y;
+/* 지금 조각의 네 칸을 그리거나(value != 0) 지운다(value == 0). */
+void stamp_piece(u8 value) {
+    u8 cell;
+    u8 cx;
+    u8 cy;
 
-    ppu_put(x0, y0, TILE_FRAME_TL);
-    ppu_put(x1, y0, TILE_FRAME_TR);
-    ppu_put(x0, y1, TILE_FRAME_BL);
-    ppu_put(x1, y1, TILE_FRAME_BR);
-
-    x = x0 + 1;
-    while (x < x1) {
-        ppu_put(x, y0, TILE_FRAME_TOP);
-        ppu_put(x, y1, TILE_FRAME_BOTTOM);
-        x = x + 1;
-    }
-
-    y = y0 + 1;
-    while (y < y1) {
-        ppu_put(x0, y, TILE_FRAME_LEFT);
-        ppu_put(x1, y, TILE_FRAME_RIGHT);
-        y = y + 1;
+    for (k = 0; k < 4; k++) {
+        cell = SHAPES[piece_t * 16 + piece_r * 4 + k];
+        cx = piece_x + (cell & 3);
+        cy = piece_y + (cell >> 2);
+        if (cy >= WELL_H) continue;
+        if (cx >= WELL_W) continue;
+        bg_tile(WELL_X + cx, WELL_Y + cy, cell_tile(value));
     }
 }
 
-void draw_menu_attributes_off(void)
-{
-    unsigned char i;
-    i = 0;
-    while (i < 32) {
-        ppu_put(i, 30, MENU_ATTRIBUTES[i]);
-        ppu_put(i, 31, MENU_ATTRIBUTES[32 + i]);
-        i = i + 1;
-    }
-}
-
-void draw_game_attributes_off(void)
-{
-    unsigned char i;
-    i = 0;
-    while (i < 32) {
-        ppu_put(i, 30, GAME_ATTRIBUTES[i]);
-        ppu_put(i, 31, GAME_ATTRIBUTES[32 + i]);
-        i = i + 1;
-    }
-}
-
-void draw_logo_off(void)
-{
-    unsigned char letter;
-    unsigned char tile;
-    unsigned char x;
-
-    letter = 0;
-    while (letter < 6) {
-        tile = TILE_LOGO + (letter * 4);
-        x = 10 + (letter * 2);
-        ppu_put(x, 2, tile);
-        ppu_put(x + 1, 2, tile + 1);
-        ppu_put(x, 3, tile + 2);
-        ppu_put(x + 1, 3, tile + 3);
-        letter = letter + 1;
-    }
-}
-
-/* One eight-tile status line, split across two vblanks so the writes always
- * finish before rendering resumes. */
-void draw_status_line(unsigned char y, unsigned char id)
-{
-    unsigned char i;
-    unsigned char base;
-
-    base = TEXT_START[id];
-    wait_vblank();
-    i = 0;
-    while (i < 4) {
-        ppu_put(22 + i, y, TEXT_DATA[base + i]);
-        i = i + 1;
-    }
-    wait_vblank();
-    while (i < 8) {
-        ppu_put(22 + i, y, TEXT_DATA[base + i]);
-        i = i + 1;
-    }
-}
-
-void draw_help(void)
-{
-    draw_status_line(20, TXT_ROT);
-    draw_status_line(21, TXT_UP_DROP);
-    draw_status_line(22, TXT_DN_SOFT);
-}
-
-void draw_status_paused(void)
-{
-    draw_status_line(20, TXT_BLANK);
-    draw_status_line(21, TXT_PAUSED);
-    draw_status_line(22, TXT_BLANK);
-}
-
-void draw_status_gameover(void)
-{
-    draw_status_line(20, TXT_GAME);
-    draw_status_line(21, TXT_OVER);
-    draw_status_line(22, TXT_START);
-}
-
-void draw_score_at(unsigned char x, unsigned char y)
-{
-    unsigned char i;
-    i = 0;
-    while (i < 6) {
-        ppu_put(x + i, y, TILE_DIGIT0 + score_digits[5 - i]);
-        i = i + 1;
-    }
-}
-
-void draw_top_value(void)
-{
-    unsigned char i;
-    i = 0;
-    while (i < 6) {
-        ppu_put(22 + i, 16, TILE_DIGIT0 + hi_score[5 - i]);
-        i = i + 1;
-    }
-}
-
-void draw_hi_row(unsigned char slot, unsigned char y)
-{
-    unsigned char i;
-    unsigned char base;
-
-    ppu_put(8, y, TILE_DIGIT0 + 1 + slot);
-    base = slot * NAME_LEN;
-    i = 0;
-    while (i < NAME_LEN) {
-        ppu_put(11 + i, y, letter_tile(hi_name[base + i]));
-        i = i + 1;
-    }
-    base = slot * 6;
-    i = 0;
-    while (i < 6) {
-        ppu_put(16 + i, y, TILE_DIGIT0 + hi_score[base + 5 - i]);
-        i = i + 1;
-    }
-}
-
-void draw_level_pick(void)
-{
-    ppu_put(15, 11, TILE_DIGIT0 + (start_level / 10));
-    ppu_put(16, 11, TILE_DIGIT0 + (start_level % 10));
-}
-
-void init_high_scores(void)
-{
-    unsigned char i;
-
-    i = 0;
-    while (i < HI_NAME_SIZE) {
-        hi_name[i] = DEFAULT_NAMES[i];
-        i = i + 1;
-    }
-    i = 0;
-    while (i < HI_SCORE_SIZE) {
-        hi_score[i] = DEFAULT_SCORES[i];
-        i = i + 1;
-    }
-}
-
-void show_title(void)
-{
-    wait_vblank();
-    ppu_off();
-    clear_screen_off();
-    draw_menu_attributes_off();
-    draw_logo_off();
-    draw_text(13, 5, TXT_FAMI_C);
-
-    draw_box_off(4, 8, 27, 13);
-    draw_text(10, 9, TXT_START_LEVEL);
-    ppu_put(13, 11, TILE_ARROW_LEFT);
-    ppu_put(18, 11, TILE_ARROW_RIGHT);
-    draw_level_pick();
-    draw_text(11, 12, TXT_LR_UD);
-
-    draw_box_off(4, 16, 27, 21);
-    draw_text(10, 17, TXT_BEST_PLAYERS);
-    draw_hi_row(0, 18);
-    draw_hi_row(1, 19);
-    draw_hi_row(2, 20);
-
-    draw_text(10, 23, TXT_PRESS_START);
-    draw_text(10, 25, TXT_A_CW_B_CCW);
-    draw_text(10, 26, TXT_HARD_DROP);
-    draw_text(9, 27, TXT_SOFT_DROP);
-
-    ppu_put(6, 9, TILE_SPARKLE);
-    ppu_put(25, 9, TILE_SPARKLE);
-    ppu_put(6, 17, TILE_SPARKLE);
-    ppu_put(25, 17, TILE_SPARKLE);
-
-    game_state = STATE_TITLE;
-    status_action = STATUS_NONE;
-    wait_vblank();
-    ppu_on();
-}
-
-void draw_entry_letters(void)
-{
-    unsigned char i;
-
-    wait_vblank();
-    i = 0;
-    while (i < NAME_LEN) {
-        ppu_put(13 + (i * 2), 18, letter_tile(entry_name[i]));
-        i = i + 1;
-    }
-    wait_vblank();
-    i = 0;
-    while (i < NAME_LEN) {
-        ppu_put(13 + (i * 2), 19, TILE_SLOT);
-        i = i + 1;
-    }
-    ppu_put(13 + (entry_pos * 2), 19, TILE_CARET);
-}
-
-void reset_entry_name(void)
-{
-    unsigned char i;
-    i = 0;
-    while (i < NAME_LEN) {
-        entry_name[i] = 1;
-        i = i + 1;
-    }
-    entry_pos = 0;
-}
-
-void show_name_entry(void)
-{
-    reset_entry_name();
-
-    wait_vblank();
-    ppu_off();
-    clear_screen_off();
-    draw_menu_attributes_off();
-
-    draw_box_off(4, 2, 27, 7);
-    draw_text(11, 3, TXT_NEW_RECORD);
-    draw_text(11, 5, TXT_RANK);
-    ppu_put(17, 5, TILE_DIGIT0 + 1 + entry_rank);
-    draw_text(11, 6, TXT_SCORE);
-    draw_score_at(17, 6);
-    ppu_put(6, 3, TILE_SPARKLE);
-    ppu_put(25, 3, TILE_SPARKLE);
-
-    draw_text(11, 13, TXT_ENTER_NAME);
-
-    draw_box_off(10, 16, 21, 21);
-    draw_text(11, 23, TXT_UD_LETTER);
-    draw_text(12, 24, TXT_LR_MOVE);
-    draw_text(12, 25, TXT_START_OK);
-
-    game_state = STATE_ENTRY;
-    status_action = STATUS_NONE;
-    draw_entry_letters();
-    wait_vblank();
-    ppu_on();
-}
-
-void clear_board(void)
-{
-    unsigned char i;
-    i = 0;
-    while (i < BOARD_SIZE) {
-        board[i] = 0;
-        i = i + 1;
-    }
-}
-
-void clear_score(void)
-{
-    unsigned char i;
-    i = 0;
-    while (i < 6) {
-        score_digits[i] = 0;
-        i = i + 1;
-    }
-    i = 0;
-    while (i < 3) {
-        line_digits[i] = 0;
-        i = i + 1;
-    }
-    level = 0;
-    level_up = 0;
-}
-
-void draw_frame_off(void)
-{
-    draw_box_off(9, 3, 20, 24);
-}
-
-/* Every panel leaves a blank row between it and its neighbour so the rails
- * read as separate boxes instead of one doubled line. */
-void draw_game_panels_off(void)
-{
-    draw_box_off(0, 3, 8, 8);
-    draw_box_off(0, 10, 8, 14);
-    draw_box_off(0, 16, 8, 20);
-    draw_box_off(21, 3, 30, 11);
-    draw_box_off(21, 13, 30, 17);
-    draw_box_off(21, 19, 30, 24);
-}
-
-void draw_board_off(void)
-{
-    unsigned char x;
-    unsigned char y;
-
-    y = 0;
-    while (y < BOARD_H) {
-        x = 0;
-        while (x < BOARD_W) {
-            ppu_put(BOARD_X + x, BOARD_Y + y, board[(y * BOARD_W) + x]);
-            x = x + 1;
-        }
-        y = y + 1;
-    }
-}
-
-void draw_board(void)
-{
-    /* Five rows per vblank remain safe even when a full BGM step decodes. */
-    wait_vblank();
-    ppu_write_board_half(3);
-    wait_vblank();
-    ppu_write_board_half(2);
-    wait_vblank();
-    ppu_write_board_half(1);
-    wait_vblank();
-    ppu_write_board_half(0);
-}
-
-void draw_score_values(void)
-{
-    ppu_put(1, 7, TILE_DIGIT0 + score_digits[5]);
-    ppu_put(2, 7, TILE_DIGIT0 + score_digits[4]);
-    ppu_put(3, 7, TILE_DIGIT0 + score_digits[3]);
-    ppu_put(4, 7, TILE_DIGIT0 + score_digits[2]);
-    ppu_put(5, 7, TILE_DIGIT0 + score_digits[1]);
-    ppu_put(6, 7, TILE_DIGIT0 + score_digits[0]);
-
-    ppu_put(3, 13, TILE_DIGIT0 + line_digits[2]);
-    ppu_put(4, 13, TILE_DIGIT0 + line_digits[1]);
-    ppu_put(5, 13, TILE_DIGIT0 + line_digits[0]);
-
-    ppu_put(3, 19, TILE_DIGIT0 + (level / 10));
-    ppu_put(4, 19, TILE_DIGIT0 + (level % 10));
-}
-
-void draw_static_game_ui(void)
-{
-    draw_text(12, 1, TXT_TETRIS);
-    draw_text(1, 5, TXT_SCORE);
-    draw_text(1, 11, TXT_LINES);
-    draw_text(1, 17, TXT_LEVEL);
-    draw_text(23, 5, TXT_NEXT);
-    draw_text(23, 14, TXT_TOP);
-    draw_top_value();
-    draw_score_values();
-    draw_help();
-}
-
-void refill_bag(void)
-{
-    unsigned char i;
-    unsigned char j;
-    unsigned char temp;
-
-    i = 0;
-    while (i < 7) {
-        bag[i] = i;
-        i = i + 1;
-    }
-
-    i = 6;
-    while (i > 0) {
-        j = rand8() % (i + 1);
-        temp = bag[i];
-        bag[i] = bag[j];
-        bag[j] = temp;
-        i = i - 1;
-    }
-    bag_pos = 0;
-}
-
-unsigned char take_bag_piece(void)
-{
-    unsigned char result;
-    if (bag_pos >= 7) {
-        refill_bag();
-    }
-    result = bag[bag_pos];
-    bag_pos = bag_pos + 1;
-    return result;
-}
-
-unsigned char collides(unsigned char nx, unsigned char ny, unsigned char nr)
-{
-    unsigned char x;
-    unsigned char y;
-    unsigned char bx;
-    unsigned char by;
-
-    y = 0;
-    while (y < 4) {
-        x = 0;
-        while (x < 4) {
-            if (shape_cell(piece_t, nr, x, y)) {
-                bx = nx + x;
-                by = ny + y;
-                if (bx >= BOARD_W) {
-                    return 1;
-                }
-                if (by >= BOARD_H) {
-                    return 1;
-                }
-                if (board[(by * BOARD_W) + bx]) {
-                    return 1;
-                }
-            }
-            x = x + 1;
-        }
-        y = y + 1;
-    }
-    return 0;
-}
-
-void capture_erase_at(unsigned char t, unsigned char r, unsigned char px, unsigned char py)
-{
-    unsigned char x;
-    unsigned char y;
-
-    erase_count = 0;
-    y = 0;
-    while (y < 4) {
-        x = 0;
-        while (x < 4) {
-            if (shape_cell(t, r, x, y)) {
-                erase_x[erase_count] = BOARD_X + px + x;
-                erase_y[erase_count] = BOARD_Y + py + y;
-                erase_count = erase_count + 1;
-            }
-            x = x + 1;
-        }
-        y = y + 1;
-    }
-}
-
-void capture_draw_current(void)
-{
-    unsigned char x;
-    unsigned char y;
-
-    draw_count = 0;
-    y = 0;
-    while (y < 4) {
-        x = 0;
-        while (x < 4) {
-            if (shape_cell(piece_t, piece_r, x, y)) {
-                draw_x[draw_count] = BOARD_X + piece_x + x;
-                draw_y[draw_count] = BOARD_Y + piece_y + y;
-                draw_count = draw_count + 1;
-            }
-            x = x + 1;
-        }
-        y = y + 1;
-    }
-}
-
-void mark_dirty(void)
-{
-    if (!piece_dirty) {
-        old_piece_x = piece_x;
-        old_piece_y = piece_y;
-        old_piece_r = piece_r;
-        piece_dirty = 1;
-    }
-}
-
-void build_next_preview(void)
-{
-    unsigned char x;
-    unsigned char y;
-    unsigned char preview_y;
-
-    y = 0;
-    while (y < 4) {
-        x = 0;
-        while (x < 4) {
-            preview_tiles[(y * 4) + x] = 0;
-            x = x + 1;
-        }
-        y = y + 1;
-    }
-
-    y = 0;
-    while (y < 4) {
-        x = 0;
-        while (x < 4) {
-            if (shape_cell(next_piece, 0, x, y)) {
-                preview_y = y + PREVIEW_SHIFT[next_piece];
-                preview_tiles[(preview_y * 4) + x] = next_piece + 1;
-            }
-            x = x + 1;
-        }
-        y = y + 1;
-    }
-}
-
-void draw_next_preview_off(void)
-{
-    build_next_preview();
-    ppu_write_preview();
-}
-
-void draw_next_preview(void)
-{
-    build_next_preview();
-    wait_vblank();
-    ppu_write_preview();
-}
-
-void spawn_piece(void)
-{
-    piece_t = next_piece;
-    next_piece = take_bag_piece();
-    piece_r = 0;
-    piece_x = 3;
-    piece_y = 0;
-    drop_tick = 0;
-    lock_tick = 0;
-    das_direction = 0;
-    das_tick = 0;
-    piece_dirty = 0;
-    lock_pending = 0;
-    erase_count = 0;
-    draw_count = 0;
-
-    if (collides(piece_x, piece_y, piece_r)) {
-        game_state = STATE_GAMEOVER;
-    }
-}
-
-void start_game(void)
-{
-    wait_vblank();
-    ppu_off();
-    clear_screen_off();
-    clear_board();
-    clear_score();
-    level = start_level;
-    refill_bag();
-    next_piece = take_bag_piece();
-    game_state = STATE_PLAYING;
-    status_action = STATUS_NONE;
-    erase_count = 0;
-    draw_count = 0;
-    clear_count = 0;
-    spawn_piece();
-    draw_game_attributes_off();
-    draw_frame_off();
-    draw_game_panels_off();
-    draw_board_off();
-    draw_static_game_ui();
-    draw_next_preview_off();
-    capture_draw_current();
-    render_queue();
-    wait_vblank();
-    ppu_on();
-}
-
-void try_move_left(void)
-{
-    /* 255 and 254 act as -1 and -2 for padded 4x4 shapes. */
-    if (!collides(piece_x - 1, piece_y, piece_r)) {
-        mark_dirty();
-        piece_x = piece_x - 1;
-        lock_tick = 0;
-        sfx_play(SFX_MOVE);
-    }
-}
-
-void try_move_right(void)
-{
-    if (!collides(piece_x + 1, piece_y, piece_r)) {
-        mark_dirty();
-        piece_x = piece_x + 1;
-        lock_tick = 0;
-        sfx_play(SFX_MOVE);
-    }
-}
-
-void try_rotate(unsigned char nr)
-{
-    unsigned char i;
-    unsigned char nx;
-
-    i = 0;
-    while (i < 5) {
-        nx = piece_x + KICKS[i];
-        if (!collides(nx, piece_y, nr)) {
-            mark_dirty();
-            piece_x = nx;
-            piece_r = nr;
-            lock_tick = 0;
-            sfx_play(SFX_ROTATE);
-            return;
-        }
-        i = i + 1;
-    }
-}
-
-void rotate_cw(void)
-{
-    unsigned char nr;
-    nr = piece_r + 1;
-    if (nr >= 4) {
-        nr = 0;
-    }
-    try_rotate(nr);
-}
-
-void rotate_ccw(void)
-{
-    unsigned char nr;
-    if (piece_r == 0) {
-        nr = 3;
-    } else {
-        nr = piece_r - 1;
-    }
-    try_rotate(nr);
-}
-
-void handle_horizontal(void)
-{
-    if (pad & PAD_LEFT) {
-        if (!(prev_pad & PAD_LEFT) || das_direction != 1) {
-            das_direction = 1;
-            das_tick = 0;
-            try_move_left();
-        } else {
-            das_tick = das_tick + 1;
-            if (das_tick >= DAS_DELAY) {
-                try_move_left();
-                das_tick = DAS_DELAY - DAS_REPEAT;
-            }
-        }
-    } else if (pad & PAD_RIGHT) {
-        if (!(prev_pad & PAD_RIGHT) || das_direction != 2) {
-            das_direction = 2;
-            das_tick = 0;
-            try_move_right();
-        } else {
-            das_tick = das_tick + 1;
-            if (das_tick >= DAS_DELAY) {
-                try_move_right();
-                das_tick = DAS_DELAY - DAS_REPEAT;
-            }
-        }
-    } else {
-        das_direction = 0;
-        das_tick = 0;
-    }
-}
-
-void hard_drop(void)
-{
-    mark_dirty();
-    while (!collides(piece_x, piece_y + 1, piece_r)) {
-        piece_y = piece_y + 1;
-    }
-    lock_pending = 1;
-    lock_tick = 0;
-    sfx_play(SFX_DROP);
-}
-
-unsigned char gravity_delay(void)
-{
-    if (level < 30) {
-        return GRAVITY[level];
+/* 조각이 (px, py, pr) 위치에 놓일 수 있는가. */
+u8 fits(u8 px, u8 py, u8 pr) {
+    u8 cell;
+    u8 cx;
+    u8 cy;
+
+    for (k = 0; k < 4; k++) {
+        cell = SHAPES[piece_t * 16 + pr * 4 + k];
+        cx = px + (cell & 3);
+        cy = py + (cell >> 2);
+        if (cx >= WELL_W) return 0;      /* 255 로 감싸 돌아도 여기서 걸린다 */
+        if (cy >= WELL_H) return 0;
+        if (board[cy * WELL_W + cx]) return 0;
     }
     return 1;
 }
 
-void tick_playing(void)
-{
-    unsigned char fall_now;
-    unsigned char did_hard_drop;
+void lock_piece(void) {
+    u8 cell;
+    u8 cx;
+    u8 cy;
 
-    piece_dirty = 0;
-    lock_pending = 0;
-
-    if ((pad & PAD_START) && !(prev_pad & PAD_START)) {
-        game_state = STATE_PAUSED;
-        status_action = STATUS_PAUSED;
-        /* Park the song first so the menu blip is the only thing left on the
-         * APU while the game is held. */
-        music_pause();
-        sfx_play(SFX_MENU);
-        return;
-    }
-
-    handle_horizontal();
-
-    if ((pad & PAD_A) && !(prev_pad & PAD_A)) {
-        rotate_cw();
-    } else if ((pad & PAD_B) && !(prev_pad & PAD_B)) {
-        rotate_ccw();
-    }
-
-    did_hard_drop = 0;
-    if ((pad & PAD_UP) && !(prev_pad & PAD_UP)) {
-        hard_drop();
-        did_hard_drop = 1;
-    }
-
-    if (!did_hard_drop) {
-        if ((pad & PAD_DOWN) && !(prev_pad & PAD_DOWN)) {
-            sfx_play(SFX_SOFT);
-        }
-
-        fall_now = 0;
-        drop_tick = drop_tick + 1;
-        if (pad & PAD_DOWN) {
-            if (drop_tick >= 2) {
-                fall_now = 1;
-            }
-        } else {
-            if (drop_tick >= gravity_delay()) {
-                fall_now = 1;
-            }
-        }
-
-        if (fall_now) {
-            drop_tick = 0;
-            if (!collides(piece_x, piece_y + 1, piece_r)) {
-                mark_dirty();
-                piece_y = piece_y + 1;
-                lock_tick = 0;
-            }
-        }
-
-        if (collides(piece_x, piece_y + 1, piece_r)) {
-            lock_tick = lock_tick + 1;
-            if (lock_tick >= LOCK_DELAY) {
-                mark_dirty();
-                lock_pending = 1;
-            }
-        } else {
-            lock_tick = 0;
-        }
-    }
-
-    if (piece_dirty) {
-        capture_erase_at(piece_t, old_piece_r, old_piece_x, old_piece_y);
-        capture_draw_current();
-    }
-}
-
-void tick_paused(void)
-{
-    if ((pad & PAD_START) && !(prev_pad & PAD_START)) {
-        game_state = STATE_PLAYING;
-        status_action = STATUS_HELP;
-        /* The song picks up on the step it was parked on. */
-        music_resume();
-        sfx_play(SFX_MENU);
-    }
-}
-
-void tick_title(void)
-{
-    unsigned char moved;
-
-    moved = 0;
-    if ((pad & PAD_RIGHT) && !(prev_pad & PAD_RIGHT)) {
-        if (start_level < MAX_LEVEL_PICK) {
-            start_level = start_level + 1;
-        } else {
-            start_level = 0;
-        }
-        moved = 1;
-    } else if ((pad & PAD_LEFT) && !(prev_pad & PAD_LEFT)) {
-        if (start_level > 0) {
-            start_level = start_level - 1;
-        } else {
-            start_level = MAX_LEVEL_PICK;
-        }
-        moved = 1;
-    } else if ((pad & PAD_UP) && !(prev_pad & PAD_UP)) {
-        if (start_level < 15) {
-            start_level = start_level + 5;
-        } else {
-            start_level = start_level - 15;
-        }
-        moved = 1;
-    } else if ((pad & PAD_DOWN) && !(prev_pad & PAD_DOWN)) {
-        if (start_level >= 5) {
-            start_level = start_level - 5;
-        } else {
-            start_level = start_level + 15;
-        }
-        moved = 1;
-    }
-
-    if (moved) {
-        status_action = STATUS_LEVEL;
-        sfx_play(SFX_MENU);
-        return;
-    }
-
-    if ((pad & PAD_START) && !(prev_pad & PAD_START)) {
-        sfx_play(SFX_CONFIRM);
-        start_game();
-    }
-}
-
-unsigned char score_beats(unsigned char slot)
-{
-    unsigned char i;
-    unsigned char base;
-
-    base = slot * 6;
-    i = 6;
-    while (i > 0) {
-        i = i - 1;
-        if (score_digits[i] > hi_score[base + i]) {
-            return 1;
-        }
-        if (score_digits[i] < hi_score[base + i]) {
-            return 0;
-        }
-    }
-    return 0;
-}
-
-unsigned char find_rank(void)
-{
-    unsigned char i;
-    i = 0;
-    while (i < HI_COUNT) {
-        if (score_beats(i)) {
-            return i;
-        }
-        i = i + 1;
-    }
-    return HI_COUNT;
-}
-
-void insert_high_score(void)
-{
-    unsigned char i;
-    unsigned char j;
-
-    i = HI_COUNT - 1;
-    while (i > entry_rank) {
-        j = 0;
-        while (j < NAME_LEN) {
-            hi_name[(i * NAME_LEN) + j] = hi_name[((i - 1) * NAME_LEN) + j];
-            j = j + 1;
-        }
-        j = 0;
-        while (j < 6) {
-            hi_score[(i * 6) + j] = hi_score[((i - 1) * 6) + j];
-            j = j + 1;
-        }
-        i = i - 1;
-    }
-
-    j = 0;
-    while (j < NAME_LEN) {
-        hi_name[(entry_rank * NAME_LEN) + j] = entry_name[j];
-        j = j + 1;
-    }
-    j = 0;
-    while (j < 6) {
-        hi_score[(entry_rank * 6) + j] = score_digits[j];
-        j = j + 1;
-    }
-}
-
-void tick_entry(void)
-{
-    unsigned char moved;
-    unsigned char c;
-
-    moved = 0;
-    if ((pad & PAD_UP) && !(prev_pad & PAD_UP)) {
-        c = entry_name[entry_pos];
-        if (c >= LAST_LETTER) {
-            c = 0;
-        } else {
-            c = c + 1;
-        }
-        entry_name[entry_pos] = c;
-        moved = 1;
-    } else if ((pad & PAD_DOWN) && !(prev_pad & PAD_DOWN)) {
-        c = entry_name[entry_pos];
-        if (c == 0) {
-            c = LAST_LETTER;
-        } else {
-            c = c - 1;
-        }
-        entry_name[entry_pos] = c;
-        moved = 1;
-    } else if ((pad & PAD_RIGHT) && !(prev_pad & PAD_RIGHT)) {
-        if (entry_pos < 2) {
-            entry_pos = entry_pos + 1;
-        } else {
-            entry_pos = 0;
-        }
-        moved = 1;
-    } else if ((pad & PAD_LEFT) && !(prev_pad & PAD_LEFT)) {
-        if (entry_pos > 0) {
-            entry_pos = entry_pos - 1;
-        } else {
-            entry_pos = 2;
-        }
-        moved = 1;
-    } else if ((pad & PAD_A) && !(prev_pad & PAD_A)) {
-        if (entry_pos < 2) {
-            entry_pos = entry_pos + 1;
-        } else {
-            entry_pos = 0;
-        }
-        moved = 1;
-    }
-
-    if (moved) {
-        status_action = STATUS_NAME;
-        sfx_play(SFX_MENU);
-        return;
-    }
-
-    if ((pad & PAD_START) && !(prev_pad & PAD_START)) {
-        sfx_play(SFX_CONFIRM);
-        insert_high_score();
-        show_title();
-    }
-}
-
-void tick_gameover(void)
-{
-    if ((pad & PAD_START) && !(prev_pad & PAD_START)) {
-        entry_rank = find_rank();
-        if (entry_rank < HI_COUNT) {
-            sfx_play(SFX_CONFIRM);
-            show_name_entry();
-        } else {
-            sfx_play(SFX_MENU);
-            show_title();
+    for (k = 0; k < 4; k++) {
+        cell = SHAPES[piece_t * 16 + piece_r * 4 + k];
+        cx = piece_x + (cell & 3);
+        cy = piece_y + (cell >> 2);
+        if (cx < WELL_W && cy < WELL_H) {
+            board[cy * WELL_W + cx] = piece_t + 1;
         }
     }
 }
 
-void lock_piece(void)
-{
-    unsigned char x;
-    unsigned char y;
-    unsigned char bx;
-    unsigned char by;
+/* ======================================================================
+ * 5. HUD
+ * ==================================================================== */
 
-    y = 0;
-    while (y < 4) {
-        x = 0;
-        while (x < 4) {
-            if (shape_cell(piece_t, piece_r, x, y)) {
-                bx = piece_x + x;
-                by = piece_y + y;
-                board[(by * BOARD_W) + bx] = piece_t + 1;
-            }
-            x = x + 1;
+void draw_preview(void) {
+    u8 cell;
+    u8 cx;
+    u8 cy;
+
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            bg_tile(3 + j, 8 + i, 0);
         }
-        y = y + 1;
+    }
+    for (k = 0; k < 4; k++) {
+        cell = SHAPES[next_piece * 16];
+        cell = SHAPES[next_piece * 16 + k];
+        cx = cell & 3;
+        cy = cell >> 2;
+        bg_tile(3 + cx, 8 + cy, T_BLOCK + next_piece);
     }
 }
 
-unsigned char find_full_rows(void)
-{
-    unsigned char x;
-    unsigned char y;
-    unsigned char full;
+void draw_hud(void) {
+    bg_text(2, 3, "SCORE");
+    bg_number(2, 4, score, 5);
+    bg_text(2, 6, "NEXT");
+    bg_text(24, 3, "LINES");
+    bg_number(24, 4, lines, 3);
+    bg_text(24, 6, "LEVEL");
+    bg_number(24, 7, level, 2);
+}
+
+void apply_level_color(void) {
+    u8 tone;
+
+    tone = LEVEL_COLOR[level % 10];
+    pal_set(6, tone);          /* 배경 팔레트 1 의 두 번째 색 */
+    pal_set(7, tone - 0x10);
+}
+
+void draw_frame(void) {
+    /* 우물 테두리. 좌우 한 줄씩, 바닥 한 줄. */
+    for (i = 0; i < WELL_H; i++) {
+        bg_tile(WELL_X - 1, WELL_Y + i, T_WALL);
+        bg_tile(WELL_X + WELL_W, WELL_Y + i, T_WALL);
+    }
+    for (j = 0; j < WELL_W + 2; j++) {
+        bg_tile(WELL_X - 1 + j, WELL_Y + WELL_H, T_FLOOR);
+    }
+    /* 우물과 테두리가 들어가는 16x16 칸의 팔레트를 정한다. */
+    for (i = 1; i < 12; i++) {
+        for (j = 5; j < 11; j++) {
+            bg_attr(j, i, 1);
+        }
+    }
+}
+
+/* ======================================================================
+ * 6. 조각 공급 (7-bag)
+ * ==================================================================== */
+
+void refill_bag(void) {
+    u8 pick;
+    u8 swap;
+
+    for (i = 0; i < PIECE_COUNT; i++) {
+        bag[i] = i;
+    }
+    /* 피셔-예이츠 셔플. 7개가 한 번씩 나오므로 같은 조각이 몰리지 않는다. */
+    for (i = PIECE_COUNT - 1; i > 0; i--) {
+        pick = rand_range(i + 1);
+        swap = bag[i];
+        bag[i] = bag[pick];
+        bag[pick] = swap;
+    }
+    bag_pos = 0;
+}
+
+u8 take_piece(void) {
+    u8 value;
+
+    if (bag_pos >= PIECE_COUNT) refill_bag();
+    value = bag[bag_pos];
+    bag_pos = bag_pos + 1;
+    return value;
+}
+
+u8 spawn_piece(void) {
+    piece_t = next_piece;
+    next_piece = take_piece();
+    piece_r = 0;
+    piece_x = SPAWN_X;
+    piece_y = SPAWN_Y;
+    drop_timer = GRAVITY[level];
+    lock_timer = 0;
+    grounded = 0;
+    draw_preview();
+    if (fits(piece_x, piece_y, piece_r) == 0) return 0;
+    stamp_piece(piece_t + 1);
+    return 1;
+}
+
+/* ======================================================================
+ * 7. 줄 지우기
+ * ==================================================================== */
+
+u8 find_full_rows(void) {
+    u8 full;
 
     clear_count = 0;
-    y = 0;
-    while (y < BOARD_H) {
+    for (i = 0; i < WELL_H; i++) {
         full = 1;
-        x = 0;
-        while (x < BOARD_W) {
-            if (board[(y * BOARD_W) + x] == 0) {
+        for (j = 0; j < WELL_W; j++) {
+            if (board[i * WELL_W + j] == 0) {
                 full = 0;
+                break;
             }
-            x = x + 1;
         }
-        if (full) {
-            clear_rows[clear_count] = y;
+        if (full && clear_count < 4) {
+            clear_rows[clear_count] = i;
             clear_count = clear_count + 1;
         }
-        y = y + 1;
     }
     return clear_count;
 }
 
-/* Rows are recorded top to bottom, so collapsing them in order never disturbs
- * a row that has not been handled yet. */
-void collapse_cleared_rows(void)
-{
-    unsigned char i;
-    unsigned char x;
-    unsigned char yy;
+void collapse_rows(void) {
+    u8 src;
+    u8 dst;
+    u8 keep;
 
-    i = 0;
-    while (i < clear_count) {
-        yy = clear_rows[i];
-        while (yy > 0) {
-            x = 0;
-            while (x < BOARD_W) {
-                board[(yy * BOARD_W) + x] = board[((yy - 1) * BOARD_W) + x];
-                x = x + 1;
-            }
-            yy = yy - 1;
+    dst = WELL_H;
+    src = WELL_H;
+    while (src > 0) {
+        src = src - 1;
+        keep = 1;
+        for (k = 0; k < clear_count; k++) {
+            if (clear_rows[k] == src) keep = 0;
         }
-        x = 0;
-        while (x < BOARD_W) {
-            board[x] = 0;
-            x = x + 1;
-        }
-        i = i + 1;
-    }
-}
-
-void flash_row(unsigned char row, unsigned char tile)
-{
-    unsigned char x;
-
-    wait_vblank();
-    x = 0;
-    while (x < 5) {
-        ppu_put(BOARD_X + x, BOARD_Y + row, tile);
-        x = x + 1;
-    }
-    wait_vblank();
-    while (x < BOARD_W) {
-        ppu_put(BOARD_X + x, BOARD_Y + row, tile);
-        x = x + 1;
-    }
-}
-
-void flash_cleared_rows(void)
-{
-    unsigned char phase;
-    unsigned char i;
-    unsigned char tile;
-
-    phase = 0;
-    while (phase < 4) {
-        tile = TILE_FLASH;
-        if (phase & 1) {
-            tile = 0;
-        }
-        i = 0;
-        while (i < clear_count) {
-            flash_row(clear_rows[i], tile);
-            i = i + 1;
-        }
-        phase = phase + 1;
-    }
-}
-
-void increment_score_digit(unsigned char position)
-{
-    unsigned char i;
-    unsigned char full;
-
-    full = 1;
-    i = position;
-    while (i < 6) {
-        if (score_digits[i] != 9) {
-            full = 0;
-        }
-        i = i + 1;
-    }
-
-    if (full) {
-        i = 0;
-        while (i < 6) {
-            score_digits[i] = 9;
-            i = i + 1;
-        }
-        return;
-    }
-
-    while (position < 6) {
-        if (score_digits[position] < 9) {
-            score_digits[position] = score_digits[position] + 1;
-            return;
-        }
-        score_digits[position] = 0;
-        position = position + 1;
-    }
-}
-
-void add_score_step(unsigned char cleared)
-{
-    unsigned char i;
-
-    if (cleared == 1) {
-        i = 0;
-        while (i < 4) {
-            increment_score_digit(1);
-            i = i + 1;
-        }
-    } else if (cleared == 2) {
-        increment_score_digit(2);
-    } else if (cleared == 3) {
-        i = 0;
-        while (i < 3) {
-            increment_score_digit(2);
-            i = i + 1;
-        }
-    } else if (cleared == 4) {
-        increment_score_digit(2);
-        increment_score_digit(2);
-        increment_score_digit(3);
-    }
-}
-
-void add_line_score(unsigned char cleared)
-{
-    unsigned char times;
-    times = level + 1;
-    while (times > 0) {
-        add_score_step(cleared);
-        times = times - 1;
-    }
-}
-
-void add_one_line(void)
-{
-    if (line_digits[2] == 9 && line_digits[1] == 9 && line_digits[0] == 9) {
-        return;
-    }
-
-    line_digits[0] = line_digits[0] + 1;
-    if (line_digits[0] >= 10) {
-        line_digits[0] = 0;
-        line_digits[1] = line_digits[1] + 1;
-        if (line_digits[1] >= 10) {
-            line_digits[1] = 0;
-            line_digits[2] = line_digits[2] + 1;
-        }
-        if (level < 99) {
-            level = level + 1;
-            level_up = 1;
-        }
-    }
-}
-
-void add_cleared_lines(unsigned char cleared)
-{
-    while (cleared > 0) {
-        add_one_line();
-        cleared = cleared - 1;
-    }
-}
-
-void service_status(void)
-{
-    if (status_action == STATUS_HELP) {
-        draw_help();
-    } else if (status_action == STATUS_PAUSED) {
-        draw_status_paused();
-    } else if (status_action == STATUS_GAMEOVER) {
-        draw_status_gameover();
-    } else if (status_action == STATUS_LEVEL) {
-        draw_level_pick();
-    } else if (status_action == STATUS_NAME) {
-        draw_entry_letters();
-    }
-    status_action = STATUS_NONE;
-}
-
-void render_changes(void)
-{
-    unsigned char cleared;
-
-    if (piece_dirty) {
-        render_queue();
-    }
-
-    if (lock_pending) {
-        lock_piece();
-        sfx_play(SFX_LAND);
-        cleared = find_full_rows();
-        if (cleared > 0) {
-            if (cleared >= 4) {
-                sfx_play(SFX_TETRIS);
-            } else {
-                sfx_play(SFX_LINE);
-            }
-            flash_cleared_rows();
-            collapse_cleared_rows();
-            add_line_score(cleared);
-            add_cleared_lines(cleared);
-            draw_board();
-            wait_vblank();
-            draw_score_values();
-            if (level_up) {
-                level_up = 0;
-                sfx_play(SFX_LEVELUP);
+        if (keep) {
+            dst = dst - 1;
+            if (dst != src) {
+                for (j = 0; j < WELL_W; j++) {
+                    board[dst * WELL_W + j] = board[src * WELL_W + j];
+                }
             }
         }
-
-        spawn_piece();
-        draw_next_preview();
-
-        if (game_state == STATE_PLAYING) {
-            capture_draw_current();
-            wait_vblank();
-            render_queue();
-        } else {
-            sfx_play(SFX_GAMEOVER);
-            /* Drawn by service_status() on the next frame so every
-             * rendering-on write goes through the same helper. */
-            status_action = STATUS_GAMEOVER;
+    }
+    while (dst > 0) {
+        dst = dst - 1;
+        for (j = 0; j < WELL_W; j++) {
+            board[dst * WELL_W + j] = 0;
         }
-
-        piece_dirty = 0;
-        lock_pending = 0;
-    } else {
-        piece_dirty = 0;
     }
 }
 
-void main(void)
-{
-    pad = 0;
-    prev_pad = 0;
-    game_state = STATE_TITLE;
-    status_action = STATUS_NONE;
-    erase_count = 0;
-    draw_count = 0;
+void award_lines(void) {
+    u16 gain;
+    u8 new_level;
+
+    gain = LINE_SCORE[clear_count] * (level + 1);
+    score = score + gain;
+    lines = lines + clear_count;
+
+    new_level = start_level + lines / 10;
+    if (new_level > MAX_LEVEL) new_level = MAX_LEVEL;
+    if (new_level != level) {
+        level = new_level;
+        apply_level_color();
+        sfx_play(SFX_LEVEL);
+    }
+}
+
+/* ======================================================================
+ * 8. 최고 점수
+ * ==================================================================== */
+
+void reset_best(void) {
+    for (i = 0; i < BEST_COUNT; i++) {
+        best_score[i] = DEFAULT_BEST[i] * 100;
+        best_name[i * 3 + 0] = 'A';
+        best_name[i * 3 + 1] = 'A';
+        best_name[i * 3 + 2] = 'A';
+    }
+}
+
+/* 새 기록이면 들어갈 자리를, 아니면 BEST_COUNT 를 돌려준다. */
+u8 best_slot_for(u16 value) {
+    for (i = 0; i < BEST_COUNT; i++) {
+        if (value > best_score[i]) return i;
+    }
+    return BEST_COUNT;
+}
+
+void insert_best(u8 slot, u16 value) {
+    u8 pos;
+
+    pos = BEST_COUNT - 1;
+    while (pos > slot) {
+        best_score[pos] = best_score[pos - 1];
+        best_name[pos * 3 + 0] = best_name[(pos - 1) * 3 + 0];
+        best_name[pos * 3 + 1] = best_name[(pos - 1) * 3 + 1];
+        best_name[pos * 3 + 2] = best_name[(pos - 1) * 3 + 2];
+        pos = pos - 1;
+    }
+    best_score[slot] = value;
+    best_name[slot * 3 + 0] = 'A';
+    best_name[slot * 3 + 1] = 'A';
+    best_name[slot * 3 + 2] = 'A';
+}
+
+void draw_best_table(u8 top) {
+    bg_text(9, top, "BEST PLAYERS");
+    for (i = 0; i < BEST_COUNT; i++) {
+        bg_number(9, top + 2 + i * 2, i + 1, 1);
+        for (j = 0; j < 3; j++) {
+            bg_char(12 + j, top + 2 + i * 2, best_name[i * 3 + j]);
+        }
+        bg_number(17, top + 2 + i * 2, best_score[i], 5);
+    }
+}
+
+/* ======================================================================
+ * 9. 화면 전환
+ * ==================================================================== */
+
+void show_title(void) {
+    ppu_off();
+    bg_clear(0);
+    pal_load(PAL_GAME);
+    bg_text(12, 2, "FAMI-C");
+    bg_text(11, 4, "BLOCKS");
+    bg_text(8, 8, "LEVEL");
+    bg_number(14, 8, start_level, 2);
+    bg_text(6, 10, "UP DOWN    +- 5");
+    bg_text(6, 11, "LEFT RIGHT +- 1");
+    draw_best_table(15);
+    bg_text(10, 25, "PRESS START");
+    ppu_on();
+    music_play(SONG_TITLE);
+}
+
+void start_game(void) {
+    ppu_off();
+    bg_clear(0);
+    pal_load(PAL_GAME);
+
+    for (i = 0; i < BOARD_SIZE; i++) {
+        board[i] = 0;
+    }
+    level = start_level;
+    score = 0;
+    lines = 0;
+    das_timer = 0;
+    das_dir = 0;
     clear_count = 0;
-    start_level = 0;
-    entry_rank = HI_COUNT;
-    /* NES RAM powers up with garbage, so give every counter a value before
-     * the title screen can read one. */
-    clear_score();
-    reset_entry_name();
-    init_high_scores();
 
-    music_init();
+    draw_frame();
+    draw_hud();
+    apply_level_color();
+
+    refill_bag();
+    next_piece = take_piece();
+    ppu_on();
+    music_play(SONG_MAIN);
+    spawn_piece();
+}
+
+void show_gameover(void) {
+    ppu_off();
+    bg_clear(0);
+    pal_load(PAL_GAME);
+    bg_text(11, 6, "GAME OVER");
+    bg_text(9, 9, "SCORE");
+    bg_number(16, 9, score, 5);
+    bg_text(9, 11, "LINES");
+    bg_number(16, 11, lines, 3);
+    draw_best_table(15);
+    bg_text(10, 25, "PRESS START");
+    ppu_on();
+    music_stop();
+    sfx_play(SFX_OVER);
+}
+
+void show_name_entry(void) {
+    ppu_off();
+    bg_clear(0);
+    pal_load(PAL_GAME);
+    bg_text(9, 6, "NEW BEST SCORE");
+    bg_number(13, 8, score, 5);
+    bg_text(6, 13, "UP DOWN    LETTER");
+    bg_text(6, 14, "LEFT RIGHT SLOT");
+    bg_text(6, 15, "START      OK");
+    ppu_on();
+    music_stop();
+}
+
+void draw_name_entry(void) {
+    for (i = 0; i < 3; i++) {
+        bg_char(14 + i * 2, 11, name_char[i]);
+        if (i == name_pos) {
+            bg_char(14 + i * 2, 12, '-');
+        } else {
+            bg_char(14 + i * 2, 12, ' ');
+        }
+    }
+}
+
+/* ======================================================================
+ * 10. 조작
+ * ==================================================================== */
+
+void try_move(u8 dx) {
+    u8 nx;
+
+    nx = piece_x + dx;
+    stamp_piece(0);
+    if (fits(nx, piece_y, piece_r)) {
+        piece_x = nx;
+        if (grounded) lock_timer = 0;
+        sfx_play(SFX_MOVE);
+    }
+    stamp_piece(piece_t + 1);
+}
+
+void try_rotate(u8 dir) {
+    u8 nr;
+    u8 kick;
+
+    nr = (piece_r + dir) & 3;
+    stamp_piece(0);
+    for (k = 0; k < 5; k++) {
+        kick = KICKS[k];
+        if (fits(piece_x + kick, piece_y, nr)) {
+            piece_x = piece_x + kick;
+            piece_r = nr;
+            if (grounded) lock_timer = 0;
+            sfx_play(SFX_ROTATE);
+            break;
+        }
+    }
+    stamp_piece(piece_t + 1);
+}
+
+/* 한 칸 내린다. 내려갔으면 1, 바닥이면 0. */
+u8 step_down(void) {
+    stamp_piece(0);
+    if (fits(piece_x, piece_y + 1, piece_r)) {
+        piece_y = piece_y + 1;
+        stamp_piece(piece_t + 1);
+        return 1;
+    }
+    stamp_piece(piece_t + 1);
+    return 0;
+}
+
+void hard_drop(void) {
+    stamp_piece(0);
+    while (fits(piece_x, piece_y + 1, piece_r)) {
+        piece_y = piece_y + 1;
+        score = score + 2;
+    }
+    stamp_piece(piece_t + 1);
+    sfx_play(SFX_DROP);
+    lock_timer = LOCK_DELAY;
+    grounded = 1;
+}
+
+void handle_das(u8 pad, u8 pressed) {
+    u8 dir;
+
+    dir = 0;
+    if (pad & PAD_LEFT) dir = 1;
+    if (pad & PAD_RIGHT) dir = 2;
+
+    if (dir == 0) {
+        das_dir = 0;
+        das_timer = 0;
+        return;
+    }
+    if (dir != das_dir) {
+        das_dir = dir;
+        das_timer = DAS_DELAY;
+        if (dir == 1) try_move(255); else try_move(1);
+        return;
+    }
+    das_timer = das_timer - 1;
+    if (das_timer == 0) {
+        das_timer = DAS_RATE;
+        if (dir == 1) try_move(255); else try_move(1);
+    }
+}
+
+/* ======================================================================
+ * 11. 상태별 갱신
+ * ==================================================================== */
+
+void update_play(void) {
+    u8 pad;
+    u8 pressed;
+
+    pad = pad_held(0);
+    pressed = pad_pressed(0);
+
+    if (pressed & PAD_START) {
+        state = ST_PAUSE;
+        music_pause();
+        bg_text(13, 14, "PAUSE");
+        return;
+    }
+    if (pressed & PAD_A) try_rotate(1);
+    if (pressed & PAD_B) try_rotate(3);
+    if (pressed & PAD_UP) {
+        hard_drop();
+    }
+    handle_das(pad, pressed);
+
+    if (pad & PAD_DOWN) {
+        drop_timer = 1;
+        score = score + 1;
+    }
+
+    drop_timer = drop_timer - 1;
+    if (drop_timer == 0) {
+        drop_timer = GRAVITY[level];
+        if (step_down()) {
+            grounded = 0;
+            lock_timer = 0;
+        } else {
+            grounded = 1;
+        }
+    }
+
+    if (grounded) {
+        lock_timer = lock_timer + 1;
+        if (lock_timer >= LOCK_DELAY) {
+            lock_piece();
+            sfx_play(SFX_LOCK);
+            if (find_full_rows()) {
+                if (clear_count >= 4) sfx_play(SFX_TETRIS); else sfx_play(SFX_LINE);
+                state = ST_CLEARING;
+                clear_step = 0;
+                clear_timer = CLEAR_TIME;
+                return;
+            }
+            if (spawn_piece() == 0) {
+                name_slot = best_slot_for(score);
+                if (name_slot < BEST_COUNT) {
+                    insert_best(name_slot, score);
+                    name_pos = 0;
+                    name_char[0] = 'A';
+                    name_char[1] = 'A';
+                    name_char[2] = 'A';
+                    state = ST_NAME;
+                    show_name_entry();
+                    draw_name_entry();
+                } else {
+                    state = ST_OVER;
+                    show_gameover();
+                }
+            }
+            draw_hud();
+        }
+    }
+}
+
+void update_clearing(void) {
+    u8 row;
+
+    clear_timer = clear_timer - 1;
+    if (clear_timer) return;
+    clear_timer = CLEAR_TIME;
+
+    if (clear_step < CLEAR_FLASH) {
+        /* 지워질 줄을 번갈아 비웠다 채우며 깜빡인다. */
+        for (k = 0; k < clear_count; k++) {
+            row = clear_rows[k];
+            for (j = 0; j < WELL_W; j++) {
+                if (clear_step & 1) {
+                    bg_tile(WELL_X + j, WELL_Y + row, cell_tile(board[row * WELL_W + j]));
+                } else {
+                    bg_tile(WELL_X + j, WELL_Y + row, 0);
+                }
+            }
+        }
+        clear_step = clear_step + 1;
+        return;
+    }
+
+    collapse_rows();
+    award_lines();
+    draw_board();
+    draw_hud();
+    clear_count = 0;
+    if (spawn_piece() == 0) {
+        name_slot = best_slot_for(score);
+        if (name_slot < BEST_COUNT) {
+            insert_best(name_slot, score);
+            name_pos = 0;
+            name_char[0] = 'A';
+            name_char[1] = 'A';
+            name_char[2] = 'A';
+            state = ST_NAME;
+            show_name_entry();
+            draw_name_entry();
+        } else {
+            state = ST_OVER;
+            show_gameover();
+        }
+        return;
+    }
+    state = ST_PLAY;
+}
+
+void update_title(void) {
+    u8 pressed;
+    u8 changed;
+
+    pressed = pad_pressed(0);
+    changed = 0;
+
+    if ((pressed & PAD_RIGHT) && start_level < MAX_LEVEL) {
+        start_level = start_level + 1;
+        changed = 1;
+    }
+    if ((pressed & PAD_LEFT) && start_level > 0) {
+        start_level = start_level - 1;
+        changed = 1;
+    }
+    if (pressed & PAD_UP) {
+        start_level = start_level + 5;
+        if (start_level > MAX_LEVEL) start_level = MAX_LEVEL;
+        changed = 1;
+    }
+    if (pressed & PAD_DOWN) {
+        if (start_level >= 5) start_level = start_level - 5; else start_level = 0;
+        changed = 1;
+    }
+    if (changed) {
+        bg_number(14, 8, start_level, 2);
+        sfx_play(SFX_MOVE);
+    }
+    if (pressed & PAD_START) {
+        /* 타이틀에서 기다린 프레임 수로 씨를 뿌린다. 매판 다른 순서가 된다. */
+        rand_seed(frame_count() + 1);
+        state = ST_PLAY;
+        start_game();
+    }
+}
+
+void update_name(void) {
+    u8 pressed;
+
+    pressed = pad_pressed(0);
+
+    if (pressed & PAD_UP) {
+        if (name_char[name_pos] >= 'Z') {
+            name_char[name_pos] = 'A';
+        } else {
+            name_char[name_pos] = name_char[name_pos] + 1;
+        }
+        sfx_play(SFX_MOVE);
+    }
+    if (pressed & PAD_DOWN) {
+        if (name_char[name_pos] <= 'A') {
+            name_char[name_pos] = 'Z';
+        } else {
+            name_char[name_pos] = name_char[name_pos] - 1;
+        }
+        sfx_play(SFX_MOVE);
+    }
+    if ((pressed & PAD_RIGHT) || (pressed & PAD_A)) {
+        name_pos = name_pos + 1;
+        if (name_pos >= 3) name_pos = 0;
+        sfx_play(SFX_MOVE);
+    }
+    if (pressed & PAD_LEFT) {
+        if (name_pos == 0) name_pos = 2; else name_pos = name_pos - 1;
+        sfx_play(SFX_MOVE);
+    }
+    if (pressed & PAD_START) {
+        for (i = 0; i < 3; i++) {
+            best_name[name_slot * 3 + i] = name_char[i];
+        }
+        state = ST_OVER;
+        show_gameover();
+        return;
+    }
+    draw_name_entry();
+}
+
+/* ======================================================================
+ * 12. main
+ * ==================================================================== */
+
+void main(void) {
+    reset_best();
+    start_level = 0;
+    state = ST_TITLE;
     show_title();
 
     while (1) {
-        pad = read_pad();
-        /* Human input timing advances the 16-bit RNG between every bag fill. */
-        rand8();
+        pad_poll();
 
-        if (game_state == STATE_TITLE) {
-            tick_title();
-        } else if (game_state == STATE_PLAYING) {
-            tick_playing();
-        } else if (game_state == STATE_PAUSED) {
-            tick_paused();
-        } else if (game_state == STATE_ENTRY) {
-            tick_entry();
-        } else {
-            tick_gameover();
+        switch (state) {
+
+        case ST_TITLE:
+            update_title();
+            break;
+
+        case ST_PLAY:
+            update_play();
+            break;
+
+        case ST_CLEARING:
+            update_clearing();
+            break;
+
+        case ST_PAUSE:
+            if (pad_pressed(0) & PAD_START) {
+                bg_text(13, 14, "     ");
+                music_resume();
+                state = ST_PLAY;
+            }
+            break;
+
+        case ST_NAME:
+            update_name();
+            break;
+
+        default:
+            if (pad_pressed(0) & PAD_START) {
+                state = ST_TITLE;
+                show_title();
+            }
+            break;
         }
 
         wait_vblank();
-        service_status();
-
-        if (game_state == STATE_PLAYING) {
-            render_changes();
-        }
-
-        prev_pad = pad;
     }
 }

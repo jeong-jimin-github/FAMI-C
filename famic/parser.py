@@ -426,7 +426,14 @@ class Parser:
             while self.peek().kind == "str":
                 text += str(self.next().value)
             return text
-        return self.parse_constant_expression()
+        # An initialiser may name an asset (`MT_GRASS`), whose value is not
+        # known until the asset compiler has run.  Fold what we can now and
+        # hand the rest to the code generator as an expression.
+        expr = self.parse_ternary()
+        try:
+            return self.fold(expr)
+        except CompileError:
+            return expr
 
     def parse_function(
         self, ret_type: object, name: str, name_tok: Token, is_extern: bool

@@ -700,27 +700,47 @@ class NES:
     SCANLINES = 262
     VBLANK_LINE = 241
 
-    def run_frame(self, budget: int = 400000) -> None:
-        """Advance one full frame (262 scanlines)."""
+    def _scanline(self, budget: List[int]) -> None:
+        used = 0
+        while used < self.CYCLES_PER_SCANLINE:
+            used += self.step()
+            budget[0] -= 1
+            if budget[0] <= 0:
+                raise Crash("프레임이 끝나지 않습니다 (무한 루프로 보입니다)", self.pc)
 
-        spent = 0
-        for line in range(self.SCANLINES):
-            if line == self.VBLANK_LINE:
-                self.ppu.status |= 0x80
-                if self.ppu.ctrl & 0x80:
-                    self.nmi()
-            elif line == 261:
+    def run_frame(self, budget: int = 400000) -> None:
+        """Advance one frame, stopping where the game thinks a frame ends.
+
+        A frame here runs from just after one vblank to the end of the next
+        vblank's NMI handler.  That matters for tooling: it means every value
+        read after `run_frame()` is the state the game settled on for that
+        frame, not a snapshot taken partway through the next frame's update
+        while the main loop happened to be running ahead of the NMI.
+        """
+
+        left = [budget]
+        # Tail of the previous frame (post-vblank), then the visible frame.
+        for line in range(self.VBLANK_LINE + 1, self.SCANLINES):
+            if line == 261:
                 self.ppu.status &= 0x3F  # clear vblank and sprite 0
-            elif line == 30 and self.ppu.rendering and self.ppu.oam[0] < 0xEF:
+            self._scanline(left)
+        for line in range(0, self.VBLANK_LINE):
+            if line == 30 and self.ppu.rendering and self.ppu.oam[0] < 0xEF:
                 # Approximate sprite 0 hit so a game that waits on it proceeds.
                 self.ppu.status |= 0x40
-            target = self.CYCLES_PER_SCANLINE
-            used = 0
-            while used < target:
-                used += self.step()
-                spent += 1
-                if spent > budget:
-                    raise Crash("프레임이 끝나지 않습니다 (무한 루프로 보입니다)", self.pc)
+            self._scanline(left)
+
+        self.ppu.status |= 0x80
+        if self.ppu.ctrl & 0x80:
+            resume_sp = self.sp
+            self.nmi()
+            # Run the handler to completion so the OAM transfer, the VRAM
+            # queue drain and the sound tick have all happened.
+            while self.sp != resume_sp:
+                self.step()
+                left[0] -= 1
+                if left[0] <= 0:
+                    raise Crash("NMI 핸들러가 끝나지 않습니다", self.pc)
         self.frame += 1
 
     # -- inspection --------------------------------------------------------

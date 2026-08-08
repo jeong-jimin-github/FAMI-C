@@ -108,6 +108,12 @@ class Runtime:
     def has(self, name: str) -> bool:
         return name in self.m
 
+    @property
+    def render_mask(self) -> str:
+        """$2001 while rendering: background always, sprites only if used."""
+
+        return "$1E" if self.has("oam") else "$0E"
+
     # ------------------------------------------------------------------
     # RAM map
     # ------------------------------------------------------------------
@@ -271,7 +277,7 @@ class Runtime:
         # NMI on; both pattern tables at $0000 so a tile index means the same
         # thing to the background and to sprites.
         self.emit("LDA #$80", "STA $2000")
-        self.emit("LDA #$1E", "STA $2001")
+        self.emit(f"LDA #{self.render_mask}", "STA $2001")
         self.emit("JSR _f_main")
         self.emit("__forever:", "JMP __forever")
         return self.lines
@@ -399,7 +405,7 @@ class Runtime:
             "_ppu_on:",
             "LDA #$01",
             "STA __rendering",
-            "LDA #$1E",
+            f"LDA #{self.render_mask}",
             "STA $2001",
             "RTS",
             "",
@@ -620,7 +626,7 @@ class Runtime:
             "PLA",
             "STA __rendering",
             "BEQ __bg_clear_done",
-            "LDA #$1E",
+            f"LDA #{self.render_mask}",
             "STA $2001",
             "__bg_clear_done:",
             "RTS",
@@ -905,7 +911,7 @@ class Runtime:
             "PLA",
             "STA __rendering",
             "BEQ __bg_map_off",
-            "LDA #$1E",
+            f"LDA #{self.render_mask}",
             "STA $2001",
             "__bg_map_off:",
             "RTS",
@@ -926,6 +932,24 @@ class Runtime:
             "LDA __a_bg_text_len",
             "STA __run_len",
             "JMP __bg_run",
+            "",
+            "_bg_char:",
+            "LDA __a_bg_char_x",
+            "STA __v_x",
+            "LDA __a_bg_char_y",
+            "STA __v_y",
+            "LDA __a_bg_char_code",
+            "SEC",
+            "SBC #32",
+            "CMP #96",
+            "BCC __bg_char_ok",
+            "LDA #$00",
+            "__bg_char_ok:",
+            "TAX",
+            "LDA __font_ascii,X",
+            "STA __v_data",
+            "JSR __vram_addr",
+            "JMP __vram_put",
         )
 
     def _bcd(self) -> None:
@@ -1888,6 +1912,16 @@ class Runtime:
             out.append(".byte " + (", ".join(f"<{n}" for n in names) if names else "$00"))
             out.append(f"{label}_hi:")
             out.append(".byte " + (", ".join(f">{n}" for n in names) if names else "$00"))
+
+        if self.has("font"):
+            # ASCII 32..127 -> CHR tile, so bg_char() can print a computed
+            # character without the program knowing where the font landed.
+            out.append("")
+            table = []
+            for code in range(32, 128):
+                ch = chr(code).upper()
+                table.append(a.font_map.get(ch, a.font_map.get(" ", 0)))
+            emit_bytes("__font_ascii", table)
 
         if self.has("notes"):
             out.append("")

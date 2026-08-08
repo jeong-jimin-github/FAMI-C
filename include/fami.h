@@ -147,6 +147,7 @@ typedef int            i16;
 /*   void bg_tile(u8 x, u8 y, u8 tile)                    네임테이블 (x,y)에 타일 하나. x는 0~31, y는 0~29. */
 /*   void bg_rect(u8 x, u8 y, u8 w, u8 h, u8 tile)        타일 하나로 사각형을 채운다. */
 /*   void bg_text(u8 x, u8 y, const char *text)           내장 폰트로 문자열을 찍는다. 인자는 반드시 문자열 리터럴. */
+/*   void bg_char(u8 x, u8 y, u8 code)                    ASCII 코드 한 글자를 찍는다. 문자열 리터럴이 아닌 글자를 그릴 때. */
 /*   void bg_number(u8 x, u8 y, u16 value, u8 digits)     값을 digits 자리 10진수로 찍는다 (앞자리 0 채움). */
 /*   void bg_attr(u8 cx, u8 cy, u8 pal)                   16x16 셀 (cx,cy)의 배경 팔레트를 고른다. cx 0~15, cy 0~14. */
 /*   void bg_meta(u8 cx, u8 cy, u8 metatile)              16x16 메타타일 하나를 그린다 (타일 4개 + 팔레트). */

@@ -178,7 +178,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         "crash": crash,
         "screen_digest": frame_digest(frame),
         "rendering": nes.ppu.rendering,
-        "sprites": sum(1 for i in range(64) if nes.ppu.oam[i * 4] < 0xEF),
+        "sprites": (
+            sum(1 for i in range(64) if nes.ppu.oam[i * 4] < 0xEF)
+            if nes.ppu.mask & 0x10
+            else 0
+        ),
         "watch": watches,
     }
     if args.screenshot:

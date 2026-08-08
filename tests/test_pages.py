@@ -4,7 +4,7 @@ import re
 import unittest
 from pathlib import Path
 
-from famic import CHR_SIZE, PRG_SIZE
+from famic.assembler import CHR_SIZE, PRG_SIZE
 
 from tools import build_pages
 

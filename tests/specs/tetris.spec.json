@@ -1,0 +1,17 @@
+{
+  "name": "blocks: 시작 -> 하드드롭 -> 점수",
+  "rom": "../../build/tetris.nes",
+  "steps": [
+    { "frames": 20, "assert": { "_g_state": 0, "_g_start_level": 0 } },
+    { "input": ["RIGHT"], "frames": 2 },
+    { "frames": 4, "assert": { "_g_start_level": 1 } },
+    { "input": ["START"], "frames": 2 },
+    { "frames": 10, "assert": { "_g_state": 1, "_g_level": 1 } },
+    { "input": ["UP"], "frames": 2 },
+    { "frames": 40, "assert": { "_g_score:16": { "gt": 0 } } },
+    { "input": ["START"], "frames": 2 },
+    { "frames": 4, "assert": { "_g_state": 3 } },
+    { "input": ["START"], "frames": 2 },
+    { "frames": 4, "assert": { "_g_state": 1 } }
+  ]
+}

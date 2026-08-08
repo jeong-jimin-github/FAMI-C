@@ -19,7 +19,7 @@ import tempfile
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from famic import build_rom  # noqa: E402
+from famic import build_file  # noqa: E402
 
 DOCS = PROJECT_ROOT / "docs"
 ROM_DIR = DOCS / "roms"
@@ -41,7 +41,7 @@ def build_roms() -> dict[Path, bytes]:
     with tempfile.TemporaryDirectory() as tmp:
         for name in EXAMPLES:
             out = Path(tmp) / f"{name}.nes"
-            build_rom(PROJECT_ROOT / "examples" / f"{name}.c", out, None)
+            build_file(PROJECT_ROOT / "examples" / f"{name}.c", out)
             roms[ROM_DIR / f"{name}.nes"] = out.read_bytes()
     return roms
 

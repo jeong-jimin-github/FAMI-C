@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/logo.svg" alt="FAMI-C — 6502 어셈블리 컴파일러" width="600">
+<img src="docs/logo.svg" alt="화미-씨 FAMI-C — 훼밀리 콤퓨타 6502 번역기" width="760">
 
 ### LLM 에이전트를 위한 패미컴(NES) C 컴파일러
 
@@ -148,7 +148,5 @@ NROM-256 (iNES mapper 0) — PRG 32KB, CHR 8KB, 세로 미러링, NTSC.
 `web-emulator/`는 [JSNES](https://github.com/bfirsh/jsnes)를 벤더링한 것으로
 각자의 라이선스를 따릅니다 (`web-emulator/LICENSE`).
 
-로고(`docs/logo.svg`)의 「화미-씨」는 원본 그림에서 그대로 벡터로 따냈습니다.
-「FAMI-C」와 부제만 [Archivo Black](https://fonts.google.com/specimen/Archivo+Black),
-[Black Han Sans](https://fonts.google.com/specimen/Black+Han+Sans)의 글리프를
-아웃라인으로 변환해 썼습니다 (SIL Open Font License 1.1).
+`docs/logo.svg`는 1980년대 한국 전자회사·개인용 컴퓨터 광고와 제품 책자의
+2도 인쇄, 기하학 심벌, 국한문 혼용 조판을 모티브로 새로 제작한 FAMI-C 독자 디자인입니다.
